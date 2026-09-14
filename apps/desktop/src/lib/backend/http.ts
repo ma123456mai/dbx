@@ -37,6 +37,7 @@ import type {
   SqlReferenceAnalysis,
   DatabaseType,
   InstalledPlugin,
+  CcSwitchPluginStatus,
   JdbcDriverInfo,
   JdbcLocalBundleInfo,
   JdbcMavenBundleInfo,
@@ -590,6 +591,22 @@ export async function installJdbcPluginLocal(pathOrFile: string | File): Promise
 
 export async function uninstallJdbcPlugin(): Promise<JdbcPluginStatus> {
   return post("/api/jdbc/plugin/uninstall", {});
+}
+
+export async function ccSwitchPluginStatus(): Promise<CcSwitchPluginStatus> {
+  throw new Error("ccSwitchPluginDesktopOnly");
+}
+
+export async function installCcSwitchPlugin(): Promise<CcSwitchPluginStatus> {
+  throw new Error("ccSwitchPluginDesktopOnly");
+}
+
+export async function installCcSwitchPluginLocal(_pathOrFile: string | File): Promise<CcSwitchPluginStatus> {
+  throw new Error("ccSwitchPluginDesktopOnly");
+}
+
+export async function uninstallCcSwitchPlugin(): Promise<CcSwitchPluginStatus> {
+  throw new Error("ccSwitchPluginDesktopOnly");
 }
 
 export async function listInstalledAgentsLocal(): Promise<AgentDriverInfo[]> {
@@ -1792,6 +1809,10 @@ export async function saveAiConfigItem(config: import("@/types/ai").AiConfigItem
 
 export async function deleteAiConfig(configId: string): Promise<void> {
   return del(`/api/ai/config/${configId}`);
+}
+
+export async function loadCcSwitchAiConfigs(): Promise<import("@/types/ai").CcSwitchImportResult> {
+  throw new Error("ccSwitchImportDesktopOnly");
 }
 
 export async function loadDesktopSettings(): Promise<DesktopSettings> {

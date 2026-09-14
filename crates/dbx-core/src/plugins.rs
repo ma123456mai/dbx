@@ -28,6 +28,8 @@ pub struct PluginManifest {
     pub executable: Option<String>,
     #[serde(default)]
     pub drivers: Vec<PluginDriverManifest>,
+    #[serde(default)]
+    pub capabilities: Vec<PluginCapabilityManifest>,
 }
 
 fn default_plugin_protocol_version() -> u32 {
@@ -41,6 +43,14 @@ pub struct PluginDriverManifest {
     pub kind: String,
     #[serde(default)]
     pub database_type: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PluginCapabilityManifest {
+    pub id: String,
+    pub label: String,
+    #[serde(default)]
+    pub kind: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +132,41 @@ impl PluginRegistry {
         }))
     }
 
+    pub fn find_capability(&self, capability_id: &str) -> Result<Option<InstalledPlugin>, String> {
+        Ok(self.list_installed()?.into_iter().find(|plugin| {
+            plugin.manifest.capabilities.iter().any(|capability| capability.id == capability_id)
+        }))
+    }
+
+    pub async fn invoke_capability<T>(
+        &self,
+        capability_id: &str,
+        method: &str,
+        params: serde_json::Value,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        self.invoke_capability_with_env(capability_id, method, params, PluginRuntimeEnv::default()).await
+    }
+
+    pub async fn invoke_capability_with_env<T>(
+        &self,
+        capability_id: &str,
+        method: &str,
+        params: serde_json::Value,
+        env: PluginRuntimeEnv,
+    ) -> Result<T, String>
+    where
+        T: DeserializeOwned,
+    {
+        let plugin = self
+            .find_capability(capability_id)?
+            .ok_or_else(|| format!("Plugin capability '{capability_id}' is not installed"))?;
+        ensure_plugin_protocol_compatible(&plugin.manifest)?;
+        invoke_plugin(&plugin, capability_id, method, params, &env, Some(capability_id)).await
+    }
+
     pub async fn invoke_driver<T>(&self, driver_id: &str, method: &str, params: serde_json::Value) -> Result<T, String>
     where
         T: DeserializeOwned,
@@ -156,7 +201,7 @@ impl PluginRegistry {
         let plugin =
             self.find_driver(driver_id)?.ok_or_else(|| format!("Plugin driver '{driver_id}' is not installed"))?;
         ensure_plugin_protocol_compatible(&plugin.manifest)?;
-        let invoke = invoke_plugin(&plugin, driver_id, method, params, &env);
+        let invoke = invoke_plugin(&plugin, driver_id, method, params, &env, None);
         match timeout_duration {
             Some(duration) => timeout(duration, invoke).await.map_err(|_| {
                 format!("Plugin '{}' timed out after {} seconds", plugin.manifest.id, duration.as_secs())
@@ -196,6 +241,8 @@ struct PluginRequest {
     jsonrpc: &'static str,
     id: u64,
     driver: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    capability: Option<String>,
     method: String,
     params: serde_json::Value,
 }
@@ -304,6 +351,7 @@ impl PluginDriverSession {
             jsonrpc: "2.0",
             id: request_id,
             driver: self.driver_id.clone(),
+            capability: None,
             method: method.to_string(),
             params,
         };
@@ -353,6 +401,7 @@ async fn invoke_plugin<T>(
     method: &str,
     params: serde_json::Value,
     env: &PluginRuntimeEnv,
+    capability: Option<&str>,
 ) -> Result<T, String>
 where
     T: DeserializeOwned,
@@ -360,7 +409,14 @@ where
     let mut child = spawn_plugin_child(plugin, env)?;
 
     let request =
-        PluginRequest { jsonrpc: "2.0", id: 1, driver: driver_id.to_string(), method: method.to_string(), params };
+        PluginRequest {
+            jsonrpc: "2.0",
+            id: 1,
+            driver: driver_id.to_string(),
+            capability: capability.map(str::to_string),
+            method: method.to_string(),
+            params,
+        };
     let line = encode_plugin_request_line(&request)?;
 
     let mut stdin = child.stdin.take().ok_or("Plugin stdin unavailable")?;
@@ -502,9 +558,13 @@ fn resolve_plugin_executable(plugin_dir: &Path, executable: &str) -> PathBuf {
 
     #[cfg(windows)]
     {
-        let bat = resolved.with_extension("bat");
-        if bat.exists() {
-            return bat;
+        if resolved.extension().is_none() {
+            for extension in ["exe", "bat"] {
+                let candidate = resolved.with_extension(extension);
+                if candidate.is_file() {
+                    return candidate;
+                }
+            }
         }
     }
 
@@ -540,6 +600,7 @@ mod tests {
                 description: String::new(),
                 executable: None,
                 drivers: Vec::new(),
+                capabilities: Vec::new(),
             },
             path: PathBuf::new(),
         };
@@ -582,6 +643,7 @@ mod tests {
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                capabilities: Vec::new(),
             },
             path: dir.clone(),
         };

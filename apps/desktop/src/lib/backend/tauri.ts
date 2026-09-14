@@ -62,6 +62,7 @@ import type {
   SqlReferenceAnalysis,
   DatabaseType,
   InstalledPlugin,
+  CcSwitchPluginStatus,
   JdbcDriverInfo,
   JdbcLocalBundleInfo,
   JdbcMavenBundleInfo,
@@ -78,7 +79,7 @@ import { isTauriCommandUnavailable, normalizeConnectionTestResult } from "@/lib/
 import type { AnnotationFile, SchemaSnapshot } from "@/docs/types";
 import type { CollectionInfo } from "@/types/database";
 import type { SidebarObjectKind } from "@/lib/database/databaseObjectCapabilities";
-import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult } from "@/types/ai";
+import type { AiChatSelectionState, AiConfig, AiConfigItem, AiEffortCapability, AiEffortLevel, AiTestConnectionResult, CcSwitchImportResult } from "@/types/ai";
 import type { QueryEditability } from "@/lib/sql/sqlAnalysis";
 import { isTerminalTransferProgress } from "@/lib/backend/transferProgress";
 import type {
@@ -650,6 +651,29 @@ export async function saveAiConfigItem(config: AiConfigItem): Promise<void> {
 
 export async function deleteAiConfig(configId: string): Promise<void> {
   return invoke("delete_ai_config", { configId });
+}
+
+export async function loadCcSwitchAiConfigs(): Promise<CcSwitchImportResult> {
+  return invoke("load_cc_switch_ai_configs");
+}
+
+export async function ccSwitchPluginStatus(): Promise<CcSwitchPluginStatus> {
+  return invoke("cc_switch_plugin_status");
+}
+
+export async function installCcSwitchPlugin(): Promise<CcSwitchPluginStatus> {
+  return invoke("install_cc_switch_plugin");
+}
+
+export async function installCcSwitchPluginLocal(path: string | File): Promise<CcSwitchPluginStatus> {
+  if (typeof path !== "string") {
+    throw new Error("Desktop CC-SWITCH plugin install requires a local file path");
+  }
+  return invoke("install_cc_switch_plugin_local", { path });
+}
+
+export async function uninstallCcSwitchPlugin(): Promise<CcSwitchPluginStatus> {
+  return invoke("uninstall_cc_switch_plugin");
 }
 
 export async function loadAiConfig(): Promise<AiConfig | null> {

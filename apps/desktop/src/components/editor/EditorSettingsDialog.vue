@@ -120,6 +120,11 @@ import { importClipboardApiKeyAfterConfirmation, type AiConfigDeepLinkDraft } fr
 import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogBundleText } from "@/lib/backend/debugLog";
 import {
   aiTestConnection,
+  loadCcSwitchAiConfigs,
+  ccSwitchPluginStatus,
+  installCcSwitchPlugin,
+  installCcSwitchPluginLocal,
+  uninstallCcSwitchPlugin,
   checkMcpServerStatus,
   installMcpServer,
   uninstallMcpServer,
@@ -175,7 +180,7 @@ import { currentStatementFrameRangeTo } from "@/lib/sql/currentStatementFrame";
 import { currentStatementFrameLayer } from "@/lib/editor/codemirrorCurrentStatementFrameLayer";
 import { buildQueryEditorLineNumbersExtension } from "@/lib/editor/queryEditorLineNumbers";
 import { normalizeSqlFormatterSettings, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
-import { validateConfigName, generateId, type AiConfigItem, type ConfigNameValidationResult } from "@/lib/ai/aiConfigList";
+import { prepareImportedAiConfigs, validateConfigName, generateId, type AiConfigItem, type ConfigNameValidationResult } from "@/lib/ai/aiConfigList";
 import { currentExecutableStatementRange, type SqlTextRange } from "@/lib/sql/sqlStatementRanges";
 import { executableStatementRangeCacheForDoc, executableStatementRangeStartingAt, type ExecutableStatementRangeCache } from "@/lib/sql/executableStatementRangeCache";
 import { EMPTY_TABLE_COLUMN_TEMPLATE_DATA_TYPE, parseTableColumnTemplateFields, TABLE_COLUMN_TEMPLATE_DATABASE_TYPES, tableColumnTemplateRowsToSettings } from "@/lib/table/tableColumnTemplates";
@@ -186,7 +191,7 @@ import { isMcpPolicyMutationBlocked, MCP_CAPABILITY_ROWS, MCP_EXECUTION_MODE_COL
 import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
-import type { DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
+import type { CcSwitchPluginStatus, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
 import { uuid } from "@/lib/common/utils";
 import { findSqlShortcutConflicts, hasSqlShortcutConflicts as sqlShortcutsHaveConflicts, SQL_SHORTCUT_TABLE_TOKEN } from "@/lib/sql/sqlShortcutActions";
 import { DEFAULT_SQL_SNIPPETS } from "@/lib/sql/sqlCompletion";
@@ -3658,6 +3663,7 @@ watch(snippetProvider, (provider) => {
 watch(activeSettingsTab, async (tab) => {
   void resetSettingsContentScroll();
   if (tab === "mcp" && !mcpStatus.value && !mcpStatusLoading.value) void refreshMcpStatus();
+  if (tab === "ai" && !isWeb) void refreshCcSwitchPluginStatus();
   if (tab === "ai" && aiIsCliProvider.value) void ensureCliMcpStatus();
   if (tab === "ai") {
     void loadMaxAgentTurnsSetting();
@@ -3698,6 +3704,7 @@ watch(
 
 onMounted(() => {
   void refreshWebDavPasswordStatus();
+  void refreshCcSwitchPluginStatus();
   checkLayoutDescTruncation();
   initTruncationObservers();
   void checkBackgroundImageFileExists();
@@ -4025,12 +4032,75 @@ async function saveWebSqlFileUploadMaxMbSetting() {
 // AI Config Delete Confirmation
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
+const aiCcSwitchImporting = ref(false);
+const aiCcSwitchPluginStatus = ref<CcSwitchPluginStatus | null>(null);
+const aiCcSwitchPluginLoading = ref(false);
+const aiCcSwitchPluginInstalling = ref(false);
+const aiCcSwitchPluginUninstalling = ref(false);
 
 const CLI_AI_PROVIDERS = new Set<AiProvider>(["claude-code-cli", "codex-cli", "opencode-cli", "pi-agent-cli", "cursor-cli", "grok-cli", "codebuddy-cli", "qoder-cli"]);
 const OPENCODE_CONTROL_ENV = new Set(["OPENCODE_CONFIG", "OPENCODE_CONFIG_CONTENT", "OPENCODE_CONFIG_DIR", "OPENCODE_DB", "OPENCODE_PERMISSION", "OPENCODE_DISABLE_PROJECT_CONFIG"]);
 const CURSOR_CONTROL_ENV = new Set(["CURSOR_CONFIG_DIR", "CURSOR_DATA_DIR"]);
 const builtinAiProviderOptions = computed(() => Object.values(AI_PROVIDER_PRESETS).filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
 const partnerAiProviderOptions = computed(() => AI_PROVIDER_PARTNER_PRESETS.filter((provider) => !isWeb || !CLI_AI_PROVIDERS.has(provider.provider)));
+
+async function refreshCcSwitchPluginStatus() {
+  if (isWeb || aiCcSwitchPluginLoading.value) return;
+  aiCcSwitchPluginLoading.value = true;
+  try {
+    aiCcSwitchPluginStatus.value = await ccSwitchPluginStatus();
+  } catch {
+    aiCcSwitchPluginStatus.value = null;
+  } finally {
+    aiCcSwitchPluginLoading.value = false;
+  }
+}
+
+async function aiInstallCcSwitchPlugin() {
+  if (isWeb || aiCcSwitchPluginInstalling.value) return;
+  aiCcSwitchPluginInstalling.value = true;
+  try {
+    aiCcSwitchPluginStatus.value = await installCcSwitchPlugin();
+    toast(t("ai.ccSwitchPluginInstallSuccess"), 4000);
+  } catch (error) {
+    toast(t("ai.ccSwitchPluginInstallFailed", { message: error instanceof Error ? error.message : String(error) }), 6000);
+  } finally {
+    aiCcSwitchPluginInstalling.value = false;
+  }
+}
+
+async function aiInstallCcSwitchPluginLocal() {
+  if (isWeb || aiCcSwitchPluginInstalling.value) return;
+  const { open } = await import("@tauri-apps/plugin-dialog");
+  const selected = await open({
+    multiple: false,
+    directory: false,
+    filters: [{ name: "DBX CC-SWITCH plugin", extensions: ["zip"] }],
+  });
+  if (typeof selected !== "string") return;
+  aiCcSwitchPluginInstalling.value = true;
+  try {
+    aiCcSwitchPluginStatus.value = await installCcSwitchPluginLocal(selected);
+    toast(t("ai.ccSwitchPluginInstallSuccess"), 4000);
+  } catch (error) {
+    toast(t("ai.ccSwitchPluginInstallFailed", { message: error instanceof Error ? error.message : String(error) }), 6000);
+  } finally {
+    aiCcSwitchPluginInstalling.value = false;
+  }
+}
+
+async function aiUninstallCcSwitchPlugin() {
+  if (isWeb || aiCcSwitchPluginUninstalling.value) return;
+  aiCcSwitchPluginUninstalling.value = true;
+  try {
+    aiCcSwitchPluginStatus.value = await uninstallCcSwitchPlugin();
+    toast(t("ai.ccSwitchPluginUninstallSuccess"), 4000);
+  } catch (error) {
+    toast(t("ai.ccSwitchPluginUninstallFailed", { message: error instanceof Error ? error.message : String(error) }), 6000);
+  } finally {
+    aiCcSwitchPluginUninstalling.value = false;
+  }
+}
 
 const aiEditProvider = ref<AiProvider>("claude");
 const aiEditProviderPresetId = ref("claude");
@@ -4578,6 +4648,51 @@ async function aiSetDefaultConfig(id: string) {
     await settingsStore.setDefaultAiConfig(id);
   } catch (e: any) {
     toast(e?.message || String(e), 5000);
+  }
+}
+
+function ccSwitchImportErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "ccSwitchNotInstalled") return t("ai.ccSwitchNotInstalled");
+  if (message === "ccSwitchPluginNotInstalled") return t("ai.ccSwitchPluginNotInstalled");
+  if (message === "ccSwitchInvalidDatabase") return t("ai.ccSwitchInvalidDatabase");
+  if (message === "ccSwitchImportDesktopOnly") return t("ai.ccSwitchImportDesktopOnly");
+  if (message.startsWith("ccSwitchHomeDirectoryFailed:")) return t("ai.ccSwitchHomeDirectoryFailed");
+  if (message.startsWith("ccSwitchOpenFailed:")) return t("ai.ccSwitchOpenFailed");
+  if (message.startsWith("ccSwitchReadFailed:")) return t("ai.ccSwitchReadFailed");
+  return message;
+}
+
+async function aiImportCcSwitchConfigs() {
+  if (isWeb || aiCcSwitchImporting.value) return;
+  aiCcSwitchImporting.value = true;
+  try {
+    const result = await loadCcSwitchAiConfigs();
+    const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, result.configs);
+    if (prepared.length === 0) {
+      toast(t("ai.ccSwitchNoNewConfigs"), 4000);
+      return;
+    }
+
+    const hadConfigs = settingsStore.aiConfigs.length > 0;
+    for (const [index, config] of prepared.entries()) {
+      await settingsStore.createAiConfig({
+        ...config,
+        id: generateId(),
+        isDefault: !hadConfigs && index === 0,
+      });
+    }
+    toast(
+      t(result.skipped.length > 0 ? "ai.ccSwitchImportPartial" : "ai.ccSwitchImportSuccess", {
+        count: prepared.length,
+        skipped: result.skipped.length,
+      }),
+      4000,
+    );
+  } catch (error) {
+    toast(ccSwitchImportErrorMessage(error), 5000);
+  } finally {
+    aiCcSwitchImporting.value = false;
   }
 }
 
@@ -7867,12 +7982,56 @@ LIMIT 100;</pre
             <section v-else-if="activeSettingsTab === 'ai'" data-settings-search-id="ai" :class="['flex flex-col gap-5 py-2', settingsSearchTargetClass('ai')]">
               <!-- Config List View -->
               <div v-if="aiConfigListMode === 'list'" class="space-y-4">
-                <div class="flex items-center justify-between">
+                <div class="flex flex-wrap items-center justify-between gap-2">
                   <h3 class="text-sm font-medium">{{ t("ai.configList") }}</h3>
-                  <Button type="button" size="sm" @click="aiEnterEditMode()">
-                    <Plus class="mr-1 h-3.5 w-3.5" />
-                    {{ t("ai.addConfig") }}
-                  </Button>
+                  <div class="flex flex-wrap items-center justify-end gap-2">
+                    <template v-if="!isWeb">
+                      <Button
+                        v-if="!aiCcSwitchPluginStatus?.installed || !aiCcSwitchPluginStatus.compatible"
+                        type="button"
+                        size="sm"
+                        variant="outline"
+                        :disabled="aiCcSwitchPluginInstalling || aiCcSwitchPluginLoading"
+                        @click="aiInstallCcSwitchPlugin"
+                      >
+                        <Loader2 v-if="aiCcSwitchPluginInstalling" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                        <Download v-else class="mr-1 h-3.5 w-3.5" />
+                        {{ aiCcSwitchPluginInstalling ? t("ai.ccSwitchPluginInstalling") : t("ai.ccSwitchPluginInstall") }}
+                      </Button>
+                      <Button
+                        v-if="!aiCcSwitchPluginStatus?.installed || !aiCcSwitchPluginStatus.compatible"
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        :disabled="aiCcSwitchPluginInstalling || aiCcSwitchPluginLoading"
+                        @click="aiInstallCcSwitchPluginLocal"
+                      >
+                        <Upload class="mr-1 h-3.5 w-3.5" />
+                        {{ t("ai.ccSwitchPluginInstallLocal") }}
+                      </Button>
+                      <Button v-if="aiCcSwitchPluginStatus?.installed && aiCcSwitchPluginStatus.compatible" type="button" size="sm" variant="outline" :disabled="aiCcSwitchImporting" @click="aiImportCcSwitchConfigs">
+                        <Loader2 v-if="aiCcSwitchImporting" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                        <Upload v-else class="mr-1 h-3.5 w-3.5" />
+                        {{ aiCcSwitchImporting ? t("ai.ccSwitchImporting") : t("ai.ccSwitchImport") }}
+                      </Button>
+                      <Button
+                        v-if="aiCcSwitchPluginStatus?.installed"
+                        type="button"
+                        size="sm"
+                        variant="ghost"
+                        :disabled="aiCcSwitchPluginUninstalling || aiCcSwitchImporting"
+                        @click="aiUninstallCcSwitchPlugin"
+                      >
+                        <Loader2 v-if="aiCcSwitchPluginUninstalling" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                        <Trash2 v-else class="mr-1 h-3.5 w-3.5" />
+                        {{ t("ai.ccSwitchPluginUninstall") }}
+                      </Button>
+                    </template>
+                    <Button type="button" size="sm" @click="aiEnterEditMode()">
+                      <Plus class="mr-1 h-3.5 w-3.5" />
+                      {{ t("ai.addConfig") }}
+                    </Button>
+                  </div>
                 </div>
 
                 <div v-if="settingsStore.aiConfigs.length === 0" class="rounded-md border border-dashed p-6 text-center">

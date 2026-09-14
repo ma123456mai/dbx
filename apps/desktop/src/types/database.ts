@@ -260,6 +260,12 @@ export interface PluginDriverManifest {
   database_type?: string;
 }
 
+export interface PluginCapabilityManifest {
+  id: string;
+  label: string;
+  kind?: string;
+}
+
 export interface PluginManifest {
   id: string;
   name: string;
@@ -268,10 +274,19 @@ export interface PluginManifest {
   description?: string;
   executable?: string;
   drivers: PluginDriverManifest[];
+  capabilities?: PluginCapabilityManifest[];
 }
 
 export interface InstalledPlugin {
   manifest: PluginManifest;
+  path: string;
+}
+
+export interface CcSwitchPluginStatus {
+  installed: boolean;
+  version?: string | null;
+  protocol_version?: number | null;
+  compatible: boolean;
   path: string;
 }
 
