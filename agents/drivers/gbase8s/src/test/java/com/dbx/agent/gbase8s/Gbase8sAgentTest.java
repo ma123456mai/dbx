@@ -241,6 +241,23 @@ class Gbase8sAgentTest {
     }
 
     @Test
+    void createDatabaseLocaleDirectiveIsRoutedToLocaleSession() {
+        // The directive branch must fire only for a leading DBX_DB_LOCALE directive on a CREATE
+        // DATABASE statement; anything else returns null and falls through to the normal query
+        // path. Parsing is tested directly because both paths throw identically when unconnected.
+        Gbase8sAgent.CreateDatabaseLocaleDirective directive = Gbase8sAgent.parseCreateDatabaseLocaleDirective(
+            "-- DBX_DB_LOCALE=zh_CN.utf8\nCREATE DATABASE app_db;"
+        );
+        Assertions.assertNotNull(directive);
+        Assertions.assertEquals("zh_CN.utf8", directive.locale());
+        Assertions.assertEquals("CREATE DATABASE app_db;", directive.statement());
+        Assertions.assertNull(Gbase8sAgent.parseCreateDatabaseLocaleDirective("CREATE DATABASE app_db;"));
+        Assertions.assertNull(Gbase8sAgent.parseCreateDatabaseLocaleDirective(
+            "-- DBX_DB_LOCALE=zh_CN.utf8\nDROP DATABASE app_db;"));
+        Assertions.assertNull(Gbase8sAgent.parseCreateDatabaseLocaleDirective(null));
+    }
+
+    @Test
     void omitsOwnerSchemasWhenTheDatabaseCannotUseThemInDml() {
         List<String> sql = new ArrayList<>();
         Gbase8sAgent agent = new Gbase8sAgent();
