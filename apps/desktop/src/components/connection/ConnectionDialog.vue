@@ -49,6 +49,7 @@ import { canPersistConnectionTestResult, connectionEditDraftSyncAction } from ".
 import { createConnectionNoteVisibilityDraft, persistConnectionNoteVisibilityDraft as persistConnectionNoteVisibilityDraftState, resetConnectionNoteVisibilityDraft, setConnectionNoteVisibilityDraft, syncConnectionNoteVisibilityDraft } from "./connectionNoteVisibilityDraft";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT, REDIS_SCAN_PAGE_SIZE_MIN, REDIS_SCAN_PAGE_SIZE_MAX, REDIS_SCAN_PAGE_SIZE_OPTIONS } from "@/lib/redis/redisKeyPattern";
 import { normalizeRedisKeyTemplates, redisKeyTemplatesToTextarea } from "@/lib/redis/redisKeyTemplates";
+import { normalizeRedisDatabaseValue } from "@/lib/redis/redisDatabaseIndex";
 import { normalizeGlobalConnectTimeoutSecs, normalizeGlobalQueryTimeoutSecs, useSettingsStore } from "@/stores/settingsStore";
 import { useToast } from "@/composables/useToast";
 import DatabaseIcon from "@/components/icons/DatabaseIcon.vue";
@@ -2637,7 +2638,9 @@ watch(
         port: profile === "tdengine" && (config.port === 0 || config.port === 6030) ? 6041 : config.port,
         username: config.username,
         password: config.password,
-        database: config.database,
+        // Show the index the backend actually connects with; legacy dirty values
+        // (e.g. redis-cli flags in the field) are healed when the form is saved.
+        database: config.db_type === "redis" ? normalizeRedisDatabaseValue(config.database) || "" : config.database,
         color: config.color || "",
         transport_layers: transportLayersForConfig(legacyConfig),
         connect_timeout_secs: config.connect_timeout_inherit === true ? settingsStore.editorSettings.globalConnectTimeoutSecs : config.connect_timeout_secs || 10,
@@ -2886,6 +2889,7 @@ const transportPathSegments = computed(() => {
 
 function defaultDatabaseForProfile() {
   if (form.value.db_type === "redshift") return "dev";
+  if (form.value.db_type === "redis") return "0";
   if (form.value.db_type === "gaussdb") return "postgres";
   if (form.value.db_type === "kwdb") return "defaultdb";
   if (form.value.db_type === "databend") return "default";
@@ -4404,6 +4408,13 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.redis_key_separator = config.redis_key_separator?.trim() ?? ":";
     const scanSize = Number(config.redis_scan_page_size);
     config.redis_scan_page_size = Number.isFinite(scanSize) && scanSize >= REDIS_SCAN_PAGE_SIZE_MIN && scanSize <= REDIS_SCAN_PAGE_SIZE_MAX ? Math.round(scanSize) : REDIS_SCAN_PAGE_SIZE_DEFAULT;
+    {
+      // A Redis database is a numeric index; dirty values (e.g. redis-cli flags
+      // pasted into the field) are stored as the index the backend connects with.
+      const database = normalizeRedisDatabaseValue(config.database);
+      config.database = database;
+      form.value.database = database || "";
+    }
     {
       const templates = normalizeRedisKeyTemplates(redisKeyTemplatesText.value);
       config.redis_key_templates = templates.length > 0 ? templates : undefined;
@@ -6274,7 +6285,7 @@ function openExternalUrl(url: string) {
               </div>
               <div class="connection-db-picker-search relative w-full sm:w-64">
                 <Search class="absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-                <Input v-model="dbSearchQuery" v-connection-dialog-auto-focus class="h-9 pl-8" :placeholder="t('connection.searchDatabasePlaceholder')" />
+                <Input data-connection-db-search v-model="dbSearchQuery" v-connection-dialog-auto-focus class="h-9 pl-8" :placeholder="t('connection.searchDatabasePlaceholder')" />
               </div>
             </div>
             <Button data-jdbc-connection-entry type="button" variant="outline" class="h-9 shrink-0 gap-2" @click="goToConnectionStep('jdbc')">

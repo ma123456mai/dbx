@@ -201,6 +201,11 @@ export interface AgentOfflineExportResult {
   bytes: number;
 }
 
+export interface AgentOfflineImportResult {
+  count: number;
+  jreCount: number;
+}
+
 export type JavaRuntimeMode = "managed" | "system" | "custom";
 
 export interface JavaRuntimeConfig {
@@ -1025,6 +1030,10 @@ export async function pendingOpenConnectionLinks(): Promise<string[]> {
 
 export async function pendingOpenAiConfigLinks(): Promise<string[]> {
   return invoke("pending_open_ai_config_links");
+}
+
+export async function pendingOpenPluginInstallLinks(): Promise<string[]> {
+  return invoke("pending_open_plugin_install_links");
 }
 
 export interface ExternalSqlFileSnapshot {
@@ -2531,7 +2540,7 @@ export async function invalidateAgentRegistryCache(): Promise<void> {
   return invoke("invalidate_agent_registry_cache");
 }
 
-export async function importAgentsFromZip(path: string | File, operationId?: string): Promise<number> {
+export async function importAgentsFromZip(path: string | File, operationId?: string): Promise<AgentOfflineImportResult> {
   if (typeof path !== "string") {
     throw new Error("Desktop offline package import requires a local file path");
   }
@@ -4455,6 +4464,18 @@ export async function documentUpdateDocument(connectionId: string, database: str
   });
 }
 
+export async function mongoReplaceDocument(connectionId: string, database: string, collection: string, filterJson: string, replacementJson: string, optionsJson?: string): Promise<{ affected_rows: number }> {
+  const affectedRows = await invoke<number>("mongo_replace_document", {
+    connectionId,
+    database,
+    collection,
+    filterJson,
+    replacementJson,
+    optionsJson,
+  });
+  return { affected_rows: affectedRows };
+}
+
 export async function mongoUpdateDocuments(connectionId: string, database: string, collection: string, filterJson: string, updateJson: string, many: boolean, optionsJson?: string): Promise<{ affected_rows: number }> {
   const affectedRows = await invoke<number>("mongo_update_documents", {
     connectionId,
@@ -4772,6 +4793,8 @@ export interface SqlFileRequest {
   filePath: string;
   continueOnError: boolean;
   selectedTables?: SqlFileTable[];
+  partCooldownMs?: number;
+  skipRelationalConstraints?: boolean;
 }
 
 export interface SqlFileTable {
@@ -4790,6 +4813,8 @@ export interface SqlFilePreview {
   preview: string;
   canExecuteWithoutSelectedDatabase: boolean;
   establishesDatabaseContext?: boolean;
+  packageFilePaths?: string[];
+  packagePartCount?: number;
 }
 
 export interface SqlFileProgress {
@@ -5071,7 +5096,7 @@ export async function releaseTableImportSource(_sourceRef: string): Promise<bool
 
 export type MongoImportFormat = "csv" | "json" | "ndjson";
 export type MongoImportTypeMode = "string" | "auto" | "extendedJson";
-export type MongoImportInferredType = "boolean" | "integer" | "decimal" | "date" | "object" | "array" | "string";
+export type MongoImportInferredType = "boolean" | "integer" | "decimal" | "date" | "objectId" | "object" | "array" | "mixed" | "string";
 export type MongoImportStatus = "running" | "done" | "error" | "cancelled";
 export type MongoImportPhase = "preparing" | "parsing" | "writing" | "done";
 export type MongoExportFormat = "csv" | "ndjson";
@@ -5096,6 +5121,7 @@ export interface MongoImportParseOptions {
   typeMode?: MongoImportTypeMode | null;
   recognizeObjectIdHex?: boolean | null;
   skipErrorRows?: boolean | null;
+  columnTypes?: Partial<Record<string, MongoImportInferredType>> | null;
 }
 
 export interface MongoImportPreviewRequest {
