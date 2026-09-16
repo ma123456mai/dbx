@@ -13,6 +13,7 @@ import * as api from "@/lib/backend/api";
 import { executeWithProductionSqlGuard } from "@/lib/database/productionExecutionGuard";
 import { clampInterval, createProcessListLoadCoordinator, DEFAULT_REFRESH_SECONDS, processListExecutionError, processListSessionCount } from "@/lib/database/mysqlProcessList";
 import { resolveProcessListDriverForConnection, type ProcessRow } from "@/lib/database/processListDrivers";
+import { useTabUiState } from "@/lib/tabs/tabUiState";
 
 const props = defineProps<{
   connection: ConnectionConfig;
@@ -21,6 +22,13 @@ const props = defineProps<{
 const { t } = useI18n();
 const connectionStore = useConnectionStore();
 const { toast } = useToast();
+const { initialState: restoredUiState, track: trackUiState } = useTabUiState<{
+  search?: string;
+  sortKey?: string;
+  sortDir?: "asc" | "desc";
+  autoRefresh?: boolean;
+  intervalSeconds?: number;
+}>({}, "ProcessListPanel");
 
 // The panel is only opened for supported engines; guard the driver defensively so
 // a missing one degrades to an empty table rather than crashing the render.
@@ -34,12 +42,13 @@ const ownSessionId = ref<number | null>(null);
 const loading = ref(false);
 const loadCoordinator = createProcessListLoadCoordinator();
 const loadError = ref("");
-const search = ref("");
-const sortKey = ref<string>(driver.value?.defaultSortKey ?? "time");
-const sortDir = ref<"asc" | "desc">("desc");
+const search = ref(restoredUiState.search ?? "");
+const restoredSortKey = columns.value.some((column) => column.key === restoredUiState.sortKey) ? restoredUiState.sortKey : undefined;
+const sortKey = ref<string>(restoredSortKey ?? driver.value?.defaultSortKey ?? "time");
+const sortDir = ref<"asc" | "desc">(restoredUiState.sortDir === "asc" ? "asc" : "desc");
 
-const autoRefresh = ref(false);
-const intervalSeconds = ref(DEFAULT_REFRESH_SECONDS);
+const autoRefresh = ref(restoredUiState.autoRefresh ?? false);
+const intervalSeconds = ref(clampInterval(restoredUiState.intervalSeconds ?? DEFAULT_REFRESH_SECONDS));
 let timer: ReturnType<typeof setInterval> | undefined;
 
 const cancelTarget = ref<ProcessRow | null>(null);
@@ -56,6 +65,8 @@ const fallbackListSql = ref<string | null>(null);
 
 // Full-text preview for long cells (SQL statement / info), opened by clicking them.
 const previewText = ref<string | null>(null);
+
+trackUiState(() => ({ search: search.value, sortKey: sortKey.value, sortDir: sortDir.value, autoRefresh: autoRefresh.value, intervalSeconds: intervalSeconds.value }));
 
 function openPreview(value: string | number | null) {
   if (value === null || value === undefined || String(value).length === 0) return;

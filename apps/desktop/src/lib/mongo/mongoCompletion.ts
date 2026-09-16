@@ -1,4 +1,20 @@
-import { ACCUMULATORS, COMMON_OPERATORS, EXPRESSION_OPERATORS, PIPELINE_STAGES, PUSH_MODIFIERS, QUERY_OPERATORS, STAGE_OPTION_KEYS, UPDATE_OPERATORS, UPDATE_OPERATOR_LABELS, VALUE_SNIPPETS, mongoOperatorItemType, type MongoOperatorSpec } from "@/lib/mongo/mongoCompletionTables";
+import { mongoExtendedJsonValueType } from "@/lib/mongo/mongoDocumentValues";
+import {
+  ACCUMULATORS,
+  COMMON_OPERATORS,
+  EXPRESSION_OPERATORS,
+  EXTENDED_JSON_VALUES,
+  FIELD_QUERY_OPERATORS,
+  PIPELINE_STAGES,
+  PUSH_MODIFIERS,
+  STAGE_OPTION_KEYS,
+  TOP_LEVEL_QUERY_OPERATORS,
+  UPDATE_OPERATORS,
+  UPDATE_OPERATOR_LABELS,
+  VALUE_SNIPPETS,
+  mongoOperatorItemType,
+  type MongoOperatorSpec,
+} from "@/lib/mongo/mongoCompletionTables";
 
 /**
  * What the cursor may usefully be completed with. Each mode maps to exactly one
@@ -10,7 +26,27 @@ import { ACCUMULATORS, COMMON_OPERATORS, EXPRESSION_OPERATORS, PIPELINE_STAGES, 
  * the editor turns into "no popup" — deliberately better than falling back to
  * `root` and showing unrelated `db.…` snippets mid-document.
  */
-export type MongoCompletionMode = "none" | "root" | "collection" | "collectionOrMethod" | "collectionRef" | "method" | "cursorMethod" | "field" | "fieldPath" | "fieldRef" | "value" | "queryOperator" | "updateOperator" | "pushModifier" | "expression" | "accumulator" | "stage" | "stageOption";
+export type MongoCompletionMode =
+  | "none"
+  | "root"
+  | "collection"
+  | "collectionOrMethod"
+  | "collectionRef"
+  | "method"
+  | "cursorMethod"
+  | "field"
+  | "filterField"
+  | "fieldPath"
+  | "fieldRef"
+  | "value"
+  | "valueWrapper"
+  | "queryOperator"
+  | "updateOperator"
+  | "pushModifier"
+  | "expression"
+  | "accumulator"
+  | "stage"
+  | "stageOption";
 
 export interface MongoCompletionField {
   name: string;
@@ -156,6 +192,12 @@ const METHOD_ARG_ROLES: Record<string, readonly MongoArgRole[]> = {
   sort: ["sortKeys"],
 };
 
+/** `{ $oid: "..." }` for a bare value position, where the user has not typed the braces yet. */
+const BRACED_EXTENDED_JSON_VALUES: MongoOperatorSpec[] = EXTENDED_JSON_VALUES.map((spec) => ({ ...spec, apply: `{ ${spec.apply} }` }));
+
+/** Query operators whose array holds plain values, unlike `$and` / `$or` / `$nor` which hold sub-filters. */
+const VALUE_ARRAY_OPERATORS = new Set(["$in", "$nin", "$all"]);
+
 const CALL_METHOD_PATTERN = new RegExp(`\\.(${Object.keys(METHOD_ARG_ROLES).join("|")})\\s*\\(`, "g");
 
 /** Modes reached by walking the `db.collection.method` chain, where a `.` switches item source. */
@@ -270,6 +312,10 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
     case "field":
       items = fieldItems(prefix, fields);
       break;
+    case "filterField":
+      // Fields lead; `$and` / `$or` and the other whole-filter operators follow once `$` is typed.
+      items = [...fieldItems(prefix, fields), ...specItems(TOP_LEVEL_QUERY_OPERATORS, prefix, "query operator", 80)];
+      break;
     case "fieldPath":
       items = fieldPathItems(prefix, fields);
       break;
@@ -277,10 +323,15 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
       items = fieldRefItems(prefix, fields);
       break;
     case "value":
-      items = specItems(VALUE_SNIPPETS, prefix, "value", 100);
+      // Shell constructors first; the extended JSON spellings need their own braces here.
+      items = [...specItems(VALUE_SNIPPETS, prefix, "value", 100), ...specItems(BRACED_EXTENDED_JSON_VALUES, prefix, "extended JSON value", 90)];
+      break;
+    case "valueWrapper":
+      items = specItems(EXTENDED_JSON_VALUES, prefix, "extended JSON value", 100);
       break;
     case "queryOperator":
-      items = specItems(QUERY_OPERATORS, prefix, "query operator", 100);
+      // `{ _id: { $oid: ... } }` is as valid here as `{ _id: { $gt: ... } }`.
+      items = [...specItems(FIELD_QUERY_OPERATORS, prefix, "query operator", 100), ...specItems(EXTENDED_JSON_VALUES, prefix, "extended JSON value", 90)];
       break;
     case "updateOperator":
       items = specItems(UPDATE_OPERATORS, prefix, "update operator", 100);
@@ -308,7 +359,7 @@ export function buildMongoCompletionItemsFromContext(context: MongoCompletionCon
 
 /** Modes whose items are built from the target collection's sampled fields. */
 export function mongoCompletionNeedsFields(mode: MongoCompletionMode): boolean {
-  return mode === "field" || mode === "fieldPath" || mode === "fieldRef" || mode === "expression";
+  return mode === "field" || mode === "filterField" || mode === "fieldPath" || mode === "fieldRef" || mode === "expression";
 }
 
 /** Modes whose items are built from the database's collection names. */
@@ -495,16 +546,22 @@ function innermost(scan: MongoCallScan): MongoContainer | undefined {
 function classifyFilter(scan: MongoCallScan, rootIndex: number): MongoCompletionMode {
   const inner = innermost(scan);
   if (!inner || innerDepth(scan, rootIndex) < 0) return "none";
+  // Elements of `$in: [...]` are values, so `{ _id: { $in: [ObjectId(...)] } }` completes like any value.
+  if (inner.kind === "array") return VALUE_ARRAY_OPERATORS.has(inner.key ?? "") && !scan.inString ? "value" : "none";
   if (inner.kind !== "object") return "none";
   if (scan.inValue) return scan.inString ? "none" : "value";
-  if (innerDepth(scan, rootIndex) === 0) return "field";
+  if (innerDepth(scan, rootIndex) === 0) return "filterField";
 
   // Inside a nested object: whose value is it?
   switch (inner.key) {
-    case null:
-      return "field"; // an element of `$and` / `$or` / `$nor`
+    case null: {
+      // An object inside an array: a sub-filter under `$and` / `$or` / `$nor`,
+      // or an extended JSON wrapper such as `{ $oid: ... }` under `$in`.
+      const parent = scan.stack[scan.stack.length - 2];
+      return parent?.kind === "array" && VALUE_ARRAY_OPERATORS.has(parent.key ?? "") ? "valueWrapper" : "filterField";
+    }
     case "$elemMatch":
-      return "field";
+      return "filterField";
     case "$expr":
       return "expression";
     case "$jsonSchema":
@@ -1015,6 +1072,9 @@ function extractActiveCollection(text: string, cursor: number): string | undefin
 
 function collectFieldTypes(value: unknown, prefix: string, out: Map<string, Set<string>>, depth: number) {
   if (depth > 4 || value == null || typeof value !== "object") return;
+  // A wrapper such as {$oid: "..."} is one BSON value. Walking into it would offer
+  // `_id.$oid`, a path that exists only in transport and matches nothing on the server.
+  if (mongoExtendedJsonValueType(value)) return;
   if (Array.isArray(value)) {
     for (const item of value.slice(0, 3)) collectFieldTypes(item, prefix, out, depth + 1);
     return;
@@ -1031,7 +1091,7 @@ function describeMongoValueType(value: unknown): string {
   if (value == null) return "null";
   if (Array.isArray(value)) return "array";
   if (value instanceof Date) return "date";
-  return typeof value === "object" ? "object" : typeof value;
+  return mongoExtendedJsonValueType(value) ?? (typeof value === "object" ? "object" : typeof value);
 }
 
 function quoteMongoFieldName(field: string, prefix: string): string {

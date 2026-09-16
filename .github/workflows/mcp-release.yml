@@ -57,6 +57,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Install dev-host dependencies for plugin-cli packing
+        run: npm ci --prefix plugins/sdk/dev-host
+
       - name: Set package versions
         id: version
         env:

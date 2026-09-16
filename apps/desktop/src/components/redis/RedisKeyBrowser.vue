@@ -2,7 +2,7 @@
 import { computed, markRaw, nextTick, ref, shallowRef, onMounted, onUnmounted, onActivated, onDeactivated, watch } from "vue";
 import type { CalendarDateTime } from "@internationalized/date";
 import { useI18n } from "vue-i18n";
-import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, History, Radio, Clock, Copy } from "@lucide/vue";
+import { Search, RefreshCw, Loader2, ChevronRight, ChevronDown, FolderClosed, FolderOpen, Trash2, Plus, KeyRound, TerminalSquare, Asterisk, Radio, Clock, Copy, X, Shield } from "@lucide/vue";
 import { RecycleScroller } from "vue-virtual-scroller";
 import "vue-virtual-scroller/dist/vue-virtual-scroller.css";
 import { Splitpanes, Pane } from "splitpanes";
@@ -60,11 +60,12 @@ import { useEditorFontFamilyStyle } from "@/composables/useEditorFontFamilyStyle
 import { useToast } from "@/composables/useToast";
 import { redisFuzzySearchScanBudget, redisKeySearchPattern, redisGroupSubtreePattern } from "@/lib/redis/redisKeyPattern";
 import { filterRedisKeyTemplates, resolveRedisKeyTemplates } from "@/lib/redis/redisKeyTemplates";
+import { forgetRedisKeySearchHistory, loadRedisKeySearchHistory, rememberRedisKeySearchHistory, type RedisKeySearchHistoryScope } from "@/lib/redis/redisKeySearchHistory";
 import { REDIS_SCAN_PAGE_SIZE_DEFAULT } from "@/lib/redis/redisKeyPattern";
 import { chunkRedisKeyRaws, collectUniqueRedisKeys } from "@/lib/redis/redisKeyBatch";
 import { getRedisCreateKeyTypeHelp, redisCreateKeyTypeHelpOptionOnOpen, shouldActivateRedisCreateKeyTypeHelpOnFocus } from "@/lib/redis/redisCreateKeyTypeHelp";
 import { optionHelpPanelOffsetTop } from "@/lib/common/optionHelpPanelOffset";
-import { applyRedisExpiryPolicy, type RedisExpiryMode, validateRedisExpiry } from "@/lib/redis/redisExpiry";
+import { applyRedisBatchExpiryPolicy, applyRedisExpiryPolicy, type RedisExpiryMode, type RedisExpiryPolicy, validateRedisExpiry } from "@/lib/redis/redisExpiry";
 import { shouldLoadMoreRedisKeys } from "@/lib/redis/redisKeyInfiniteScroll";
 import { formatTtl } from "@/lib/common/ttlFormat";
 import { computeTtlCountdownValue } from "@/lib/redis/redisAutoRefresh";
@@ -135,6 +136,11 @@ const redisExpiryTransport = {
   setExpireAt: api.redisSetExpireAt,
 };
 
+const redisBatchExpiryTransport = {
+  setKeysTtl: api.redisSetKeysTtl,
+  setKeysExpireAt: api.redisSetKeysExpireAt,
+};
+
 const flatKeys = shallowRef<RedisKeyInfo[]>([]);
 const treeKeys = shallowRef<RedisKeyTreeNode[]>([]);
 let flatKeyByRaw = new Map<string, RedisKeyInfo>();
@@ -158,6 +164,10 @@ const fuzzyKeySearch = ref(restoredRedisKeyBrowserState?.fuzzyKeySearch ?? false
 const keyTemplateMenuOpen = ref(false);
 const keyTemplateSelectedIndex = ref(0);
 const keyTemplateListboxId = `redis-key-template-suggestions-${uuid()}`;
+const searchHistoryMenuOpen = ref(false);
+const searchHistoryItems = ref<string[]>([]);
+const searchHistorySelectedIndex = ref(-1);
+const searchHistoryListboxId = `redis-key-search-history-${uuid()}`;
 let keyTemplateBlurTimer: ReturnType<typeof setTimeout> | null = null;
 const selectedKeyRaw = ref<string | null>(null);
 const hasMore = ref(false);
@@ -173,6 +183,13 @@ const noExpiryProjectionEpoch = ref(0);
 const selectionAnchorRowId = ref<string | null>(null);
 const selectedGroupLeafCounts = shallowRef<Map<string, number>>(new Map());
 const deletingKeys = ref(false);
+const showBatchExpiryDialog = ref(false);
+const savingBatchExpiry = ref(false);
+const batchExpiryMode = ref<RedisExpiryMode>("none");
+const batchExpiryTtl = ref("");
+const batchExpiryExpireAt = shallowRef<CalendarDateTime | null>(null);
+/** Snapshot taken when the dialog opens so a background refresh cannot retarget the batch. */
+const batchExpiryKeyRaws = shallowRef<string[]>([]);
 const pendingDanger = ref<{ kind: "delete-keys"; title: string; keyRaws: string[]; loadedSearchResults: boolean } | { kind: "command"; command: string } | null>(null);
 const showDangerConfirm = ref(false);
 const commandText = ref("");
@@ -288,7 +305,9 @@ const isFuzzyKeySearch = computed(() => searchMode.value === "key" && isSearchMo
 const fuzzyTreeLimitReached = computed(() => isFuzzyKeySearch.value && !canBuildRedisFuzzyTree(flatKeys.value.length));
 const useFlatKeySearchRows = computed(() => showCustomGrouping.value || (searchMode.value === "key" && isSearchMode.value && !fuzzyKeySearch.value) || fuzzyTreeLimitReached.value);
 const isFuzzyHierarchyView = computed(() => isFuzzyKeySearch.value && !fuzzyTreeLimitReached.value);
-const selectionBusy = computed(() => deletingKeys.value || loading.value || loadingMore.value || isFetchingAll.value || searchPending.value);
+/** True while a key-list mutation (delete or batch expiry) owns the visible result set. */
+const mutatingKeys = computed(() => deletingKeys.value || savingBatchExpiry.value);
+const selectionBusy = computed(() => mutatingKeys.value || loading.value || loadingMore.value || isFetchingAll.value || searchPending.value);
 // checkedKeys is always a subset of loaded keys, so size equality is enough.
 const allLoadedKeysSelected = computed(() => flatKeys.value.length > 0 && checkedKeys.value.size === flatKeys.value.length);
 const allKeysSelected = computed(() => (customGrouping.value.enabled ? filteredFlatKeys.value.length > 0 && checkedKeys.value.size === filteredFlatKeys.value.length : allLoadedKeysSelected.value && !hasMore.value));
@@ -298,8 +317,22 @@ const searchPlaceholder = computed(() => {
 });
 const redisKeyTemplates = computed(() => resolveRedisKeyTemplates(connectionStore.getConfig(props.connectionId)?.redis_key_templates, settingsStore.editorSettings.redisKeyTemplates ?? []));
 const keyTemplateSuggestions = computed(() => (searchMode.value === "key" ? filterRedisKeyTemplates(redisKeyTemplates.value, searchPattern.value) : []));
-const keyTemplateMenuVisible = computed(() => keyTemplateMenuOpen.value && searchMode.value === "key" && keyTemplateSuggestions.value.length > 0);
+const keyTemplateMenuVisible = computed(() => keyTemplateMenuOpen.value && !searchHistoryMenuOpen.value && searchMode.value === "key" && keyTemplateSuggestions.value.length > 0);
 const keyTemplateActiveDescendant = computed(() => (keyTemplateMenuVisible.value ? `${keyTemplateListboxId}-option-${keyTemplateSelectedIndex.value}` : undefined));
+const searchHistoryScope = computed<RedisKeySearchHistoryScope>(() => ({
+  connectionId: props.connectionId,
+  db: props.db,
+}));
+const searchHistoryMenuVisible = computed(() => searchHistoryMenuOpen.value);
+const searchHistoryEmptyText = computed(() => t("redis.keySearchHistoryEmpty"));
+const searchHistoryActiveDescendant = computed(() => (searchHistoryMenuVisible.value && searchHistorySelectedIndex.value >= 0 ? `${searchHistoryListboxId}-option-${searchHistorySelectedIndex.value}` : undefined));
+const searchComboboxExpanded = computed(() => keyTemplateMenuVisible.value || searchHistoryMenuVisible.value);
+const searchComboboxControls = computed(() => {
+  if (searchHistoryMenuVisible.value) return searchHistoryListboxId;
+  if (keyTemplateMenuVisible.value) return keyTemplateListboxId;
+  return undefined;
+});
+const searchComboboxActiveDescendant = computed(() => searchHistoryActiveDescendant.value ?? keyTemplateActiveDescendant.value);
 const loadingEmptyText = computed(() => (isValueSearchMode.value && valueQuery.value ? t(searchMode.value === "all" ? "redis.searchingAll" : "redis.searchingValues") : t("redis.loadingKeys")));
 const redisKeySeparator = computed(() => connectionStore.getConfig(props.connectionId)?.redis_key_separator ?? ":");
 const redisScanPageSize = computed(() => connectionStore.getConfig(props.connectionId)?.redis_scan_page_size ?? REDIS_SCAN_PAGE_SIZE_DEFAULT);
@@ -990,6 +1023,7 @@ async function loadKeys() {
   if (searchTimer) clearTimeout(searchTimer);
   searchTimer = null;
   searchPending.value = false;
+  rememberRedisKeySearchHistory(searchHistoryScope.value, searchPattern.value);
   const requestId = invalidateScanRequests();
   isFetchingAll.value = false;
   fetchAllStopRequested.value = false;
@@ -1122,7 +1156,7 @@ function onRedisKeyScroll(event: Event) {
     const shouldLoad = shouldLoadMoreRedisKeys({
       enabled: redisInfiniteScrollEnabled.value,
       hasMore: hasMore.value,
-      busy: loading.value || loadingMore.value || searchPending.value || deletingKeys.value || isFetchingAll.value,
+      busy: loading.value || loadingMore.value || searchPending.value || mutatingKeys.value || isFetchingAll.value,
       loadedKeys: flatKeys.value.length,
       maxKeys: redisInfiniteScrollMaxKeys.value,
       scrollTop: scroller.scrollTop,
@@ -1769,6 +1803,116 @@ function scrollCommandTerminalToEnd() {
   });
 }
 
+// ---------------------------------------------------------------------------
+// Batch expiration
+// ---------------------------------------------------------------------------
+
+/** Keeps only the given loaded keys checked, so a partial batch failure can be retried. */
+function retainCheckedKeys(keyRaws: Iterable<string>) {
+  const keep = new Set(keyRaws);
+  const nextChecked = new Set<string>();
+  for (const keyRaw of checkedKeys.value) {
+    if (keep.has(keyRaw) && loadedKeyRaws.has(keyRaw)) nextChecked.add(keyRaw);
+  }
+  checkedKeys.value = nextChecked;
+  selectedGroupLeafCounts.value = groupLeafCountsFromChecked(nextChecked);
+  selectionEpoch.value++;
+}
+
+/**
+ * Writes a server-confirmed TTL straight into one loaded row, and reports
+ * whether its no-expiry membership changed.
+ *
+ * The batch result already carries the applied TTL, so the list badge and its
+ * countdown update without one refresh request per key.
+ */
+function applyKeyTtlMetadata(keyRaw: string, ttl: number): boolean {
+  const keyInfo = flatKeyByRaw.get(keyRaw);
+  if (!keyInfo) return false;
+  const previousTtl = keyInfo.ttl ?? -2;
+  const nextKeyInfo: RedisKeyInfo = { ...keyInfo, ttl };
+  if (!updateRedisKeyInfoMetadataByRaw(flatKeyByRaw, nextKeyInfo)) return false;
+  recordKeyTtlObservedAt(nextKeyInfo);
+  if (treeIndex) updateRedisKeyTreeLeafMetadata(treeIndex, nextKeyInfo);
+  return (previousTtl === -1) !== (ttl === -1);
+}
+
+function applyBatchExpiryMetadata(keyRaws: readonly string[], policy: RedisExpiryPolicy) {
+  const nowSeconds = Math.ceil(Date.now() / 1_000);
+  let noExpiryMembershipChanged = false;
+
+  for (const keyRaw of keyRaws) {
+    if (policy.mode === "at") {
+      const remaining = policy.expireAt - nowSeconds;
+      // EXPIREAT with an already-past timestamp deletes the key instead of expiring it.
+      if (remaining <= 0) {
+        onKeyDeleted(keyRaw);
+        continue;
+      }
+      if (applyKeyTtlMetadata(keyRaw, remaining)) noExpiryMembershipChanged = true;
+      continue;
+    }
+    if (applyKeyTtlMetadata(keyRaw, policy.mode === "ttl" ? policy.ttl : -1)) noExpiryMembershipChanged = true;
+  }
+
+  // Publish one metadata refresh for the whole batch: a 1000-key selection must
+  // not schedule 1000 reactive updates or 1000 countdown-timer re-checks.
+  if (noExpiryMembershipChanged) noExpiryProjectionEpoch.value++;
+  keyMetadataEpoch.value++;
+  syncListTtlTimer();
+}
+
+function openBatchExpiryDialog() {
+  if (checkedKeys.value.size === 0 || selectionBusy.value) return;
+  batchExpiryKeyRaws.value = [...checkedKeys.value];
+  batchExpiryMode.value = "none";
+  batchExpiryTtl.value = "";
+  batchExpiryExpireAt.value = null;
+  showBatchExpiryDialog.value = true;
+}
+
+function onBatchExpiryDialogOpenChange(open: boolean) {
+  if (!open && savingBatchExpiry.value) return;
+  showBatchExpiryDialog.value = open;
+}
+
+async function saveBatchExpiry() {
+  if (savingBatchExpiry.value || batchExpiryKeyRaws.value.length === 0) return;
+  const validation = validateRedisExpiry(batchExpiryMode.value, batchExpiryTtl.value, batchExpiryExpireAt.value);
+  if (!validation.valid) {
+    toast(expiryValidationMessage(validation.reason), 3000);
+    return;
+  }
+
+  const keyRaws = batchExpiryKeyRaws.value;
+  savingBatchExpiry.value = true;
+  try {
+    const summary = await applyRedisBatchExpiryPolicy(redisBatchExpiryTransport, props.connectionId, props.db, keyRaws, validation.policy);
+    const failed = new Set(summary.failedKeyRaws);
+    applyBatchExpiryMetadata(
+      keyRaws.filter((keyRaw) => !failed.has(keyRaw)),
+      validation.policy,
+    );
+
+    if (failed.size > 0) {
+      // Keep only the keys that were not updated so the user can retry them directly.
+      retainCheckedKeys(failed);
+      toast(t("redis.batchExpiryPartial", { success: summary.applied, failed: failed.size }), 5000);
+    } else {
+      resetCheckedKeys();
+      toast(t("redis.batchExpirySuccess", { count: summary.applied }), 3000);
+    }
+    // Surface the underlying cause as well; the count toast above keeps the partial result.
+    if (summary.errors.length > 0) toast(summary.errors[0], 5000);
+  } catch (error) {
+    toast(errorMessage(error), 5000);
+  } finally {
+    savingBatchExpiry.value = false;
+    showBatchExpiryDialog.value = false;
+    batchExpiryKeyRaws.value = [];
+  }
+}
+
 function appendCommandHistory(entry: Omit<RedisCommandHistoryEntry, "id">): number {
   const id = ++commandHistoryId;
   commandHistory.value = [...commandHistory.value, { id, ...entry }];
@@ -2262,11 +2406,77 @@ function dismissKeyTemplateMenu() {
   }
 }
 
+function dismissSearchHistoryMenu() {
+  searchHistoryMenuOpen.value = false;
+  searchHistoryItems.value = [];
+  searchHistorySelectedIndex.value = -1;
+}
+
+function refreshSearchHistoryItems() {
+  // ChevronDown shows the full connection+db history so earlier patterns stay
+  // visible after the user switches to another search (or key/value mode).
+  searchHistoryItems.value = loadRedisKeySearchHistory(searchHistoryScope.value);
+  if (searchHistorySelectedIndex.value >= searchHistoryItems.value.length) {
+    searchHistorySelectedIndex.value = searchHistoryItems.value.length > 0 ? searchHistoryItems.value.length - 1 : -1;
+  }
+}
+
+function openSearchHistoryMenu() {
+  dismissKeyTemplateMenu();
+  refreshSearchHistoryItems();
+  searchHistoryMenuOpen.value = true;
+  searchHistorySelectedIndex.value = -1;
+}
+
+function toggleSearchHistoryMenu() {
+  if (searchHistoryMenuOpen.value) {
+    dismissSearchHistoryMenu();
+    return;
+  }
+  openSearchHistoryMenu();
+}
+
+function selectSearchHistory(index: number) {
+  const entry = searchHistoryItems.value[index];
+  if (!entry) return;
+  if (searchTimer) {
+    clearTimeout(searchTimer);
+    searchTimer = null;
+  }
+  searchPending.value = false;
+  searchPattern.value = entry;
+  dismissSearchHistoryMenu();
+  dismissKeyTemplateMenu();
+  void nextTick(() => getSearchInput()?.focus());
+}
+
+function forgetSearchHistory(value: string) {
+  forgetRedisKeySearchHistory(searchHistoryScope.value, value);
+  refreshSearchHistoryItems();
+  searchHistoryMenuOpen.value = true;
+  void nextTick(() => getSearchInput()?.focus());
+}
+
+function moveSearchHistorySelection(direction: number): boolean {
+  if (!searchHistoryMenuVisible.value || searchHistoryItems.value.length === 0) return false;
+  const count = searchHistoryItems.value.length;
+  if (searchHistorySelectedIndex.value < 0) {
+    searchHistorySelectedIndex.value = direction > 0 ? 0 : count - 1;
+  } else {
+    searchHistorySelectedIndex.value = Math.min(Math.max(searchHistorySelectedIndex.value + direction, 0), count - 1);
+  }
+  void nextTick(() => {
+    document.getElementById(`${searchHistoryListboxId}-option-${searchHistorySelectedIndex.value}`)?.scrollIntoView({ block: "nearest" });
+  });
+  return true;
+}
+
 function openKeyTemplateMenu() {
   if (searchMode.value !== "key" || redisKeyTemplates.value.length === 0) {
     dismissKeyTemplateMenu();
     return;
   }
+  dismissSearchHistoryMenu();
   keyTemplateMenuOpen.value = true;
   keyTemplateSelectedIndex.value = 0;
 }
@@ -2308,11 +2518,13 @@ function onSearchBlur() {
   if (keyTemplateBlurTimer) clearTimeout(keyTemplateBlurTimer);
   keyTemplateBlurTimer = setTimeout(() => {
     dismissKeyTemplateMenu();
+    dismissSearchHistoryMenu();
     keyTemplateBlurTimer = null;
   }, 150);
 }
 
 function onSearchInput() {
+  dismissSearchHistoryMenu();
   if (searchMode.value === "key" && redisKeyTemplates.value.length > 0) {
     keyTemplateMenuOpen.value = true;
     keyTemplateSelectedIndex.value = 0;
@@ -2357,6 +2569,7 @@ function onSearchInput() {
 function setSearchMode(mode: RedisSearchMode) {
   if (searchMode.value === mode) return;
   searchMode.value = mode;
+  dismissSearchHistoryMenu();
   if (mode !== "key") dismissKeyTemplateMenu();
   void loadKeys();
 }
@@ -2544,6 +2757,35 @@ function focusSearch(): boolean {
 }
 
 function onSearchKeydown(event: KeyboardEvent) {
+  if (event.isComposing) return;
+
+  if (searchHistoryMenuVisible.value) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveSearchHistorySelection(1);
+      return;
+    }
+    if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveSearchHistorySelection(-1);
+      return;
+    }
+    if (event.key === "Enter") {
+      event.preventDefault();
+      if (searchHistorySelectedIndex.value >= 0) {
+        selectSearchHistory(searchHistorySelectedIndex.value);
+      } else {
+        dismissSearchHistoryMenu();
+        void loadKeys();
+      }
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      dismissSearchHistoryMenu();
+      return;
+    }
+  }
   if (keyTemplateMenuVisible.value) {
     if (event.key === "ArrowDown") {
       event.preventDefault();
@@ -2574,6 +2816,7 @@ function onSearchKeydown(event: KeyboardEvent) {
   event.preventDefault();
   searchPattern.value = "";
   dismissKeyTemplateMenu();
+  dismissSearchHistoryMenu();
   void loadKeys();
 }
 
@@ -2925,12 +3168,13 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   >{{ customGrouping.enabled ? t("redisGrouping.selectLoaded") : t("redis.selectAllLoaded") }}</Button
                 >
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" data-redis-deselect-all @click="clearAllCheckedKeys">{{ t("redis.deselectAll") }}</Button>
+                <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 px-1.5 text-xs" :disabled="selectionBusy" :title="t('redis.batchExpiry')" data-redis-batch-expiry @click="openBatchExpiryDialog"><Clock class="w-3 h-3 mr-1" />{{ t("redis.batchExpiry") }}</Button>
                 <Button v-if="checkedKeys.size > 0" variant="ghost" size="sm" class="h-6 shrink-0 text-xs text-destructive" :disabled="selectionBusy" data-redis-batch-delete @click="requestBatchDelete"><Trash2 class="w-3 h-3 mr-1" />{{ checkedKeys.size }}</Button>
-                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="deletingKeys || loading || loadingMore || isFetchingAll" @click="loadKeys">
+                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :disabled="mutatingKeys || loading || loadingMore || isFetchingAll" @click="loadKeys">
                   <Loader2 v-if="loading" class="h-3 w-3 animate-spin" />
                   <RefreshCw v-else class="h-3 w-3" />
                 </Button>
-                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('redis.createKey')" @click="openCreateKeyDialog">
+                <Button variant="ghost" size="icon" class="h-6 w-6 shrink-0" :title="t('redis.createKey')" @click="openCreateKeyDialog()">
                   <Plus class="h-3 w-3" />
                 </Button>
               </div>
@@ -2942,17 +3186,56 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   v-model="searchPattern"
                   data-redis-search-input
                   role="combobox"
-                  class="h-8 border-border/70 bg-background pl-8 pr-3 text-xs shadow-sm caret-primary placeholder:text-muted-foreground/80 focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/20"
+                  class="h-8 border-border/70 bg-background pl-8 pr-8 text-xs shadow-sm caret-primary placeholder:text-muted-foreground/80 focus-visible:border-primary/60 focus-visible:ring-2 focus-visible:ring-primary/20"
                   :placeholder="searchPlaceholder"
-                  :aria-expanded="keyTemplateMenuVisible"
-                  :aria-controls="keyTemplateMenuVisible ? keyTemplateListboxId : undefined"
-                  :aria-activedescendant="keyTemplateActiveDescendant"
+                  :aria-expanded="searchComboboxExpanded"
+                  :aria-controls="searchComboboxControls"
+                  :aria-activedescendant="searchComboboxActiveDescendant"
                   autocomplete="off"
                   @input="onSearchInput"
                   @keydown="onSearchKeydown"
                   @focus="onSearchFocus"
                   @blur="onSearchBlur"
                 />
+                <button
+                  type="button"
+                  data-redis-search-history-toggle
+                  class="absolute right-1.5 top-1/2 z-[1] -translate-y-1/2 rounded-sm p-0.5 text-muted-foreground hover:text-foreground"
+                  :title="t('redis.keySearchHistory')"
+                  :aria-label="t('redis.keySearchHistory')"
+                  :aria-expanded="searchHistoryMenuVisible"
+                  :aria-controls="searchHistoryMenuVisible ? searchHistoryListboxId : undefined"
+                  @mousedown.prevent
+                  @click="toggleSearchHistoryMenu"
+                >
+                  <ChevronDown class="h-3 w-3" />
+                </button>
+                <div
+                  v-if="searchHistoryMenuVisible"
+                  :id="searchHistoryListboxId"
+                  role="listbox"
+                  data-redis-search-history-list
+                  :aria-label="t('redis.keySearchHistory')"
+                  class="absolute left-0 right-0 top-[calc(100%+0.25rem)] z-30 max-h-60 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md"
+                >
+                  <div
+                    v-for="(entry, index) in searchHistoryItems"
+                    :id="`${searchHistoryListboxId}-option-${index}`"
+                    :key="entry"
+                    role="option"
+                    data-redis-search-history-item
+                    class="dbx-editor-font-family flex w-full cursor-pointer items-center px-3 py-1.5 text-left text-xs hover:bg-accent hover:text-accent-foreground"
+                    :class="searchHistorySelectedIndex === index ? 'bg-accent text-accent-foreground' : ''"
+                    :aria-selected="searchHistorySelectedIndex === index"
+                    @mousedown.prevent="selectSearchHistory(index)"
+                  >
+                    <span class="min-w-0 flex-1 truncate" :title="entry">{{ entry }}</span>
+                    <button type="button" data-redis-search-history-forget class="ml-2 shrink-0 text-muted-foreground hover:text-foreground" :aria-label="t('redis.keySearchHistoryForget')" @mousedown.stop.prevent="forgetSearchHistory(entry)">
+                      <X class="h-3 w-3" />
+                    </button>
+                  </div>
+                  <div v-if="searchHistoryItems.length === 0" class="px-3 py-2 text-xs text-muted-foreground">{{ searchHistoryEmptyText }}</div>
+                </div>
                 <div v-if="keyTemplateMenuVisible" :id="keyTemplateListboxId" role="listbox" :aria-label="t('redis.keyTemplateSuggestions')" class="absolute left-0 right-0 top-[calc(100%+0.25rem)] z-30 max-h-60 overflow-y-auto rounded-md border bg-popover py-1 text-popover-foreground shadow-md">
                   <button
                     v-for="(template, index) in keyTemplateSuggestions"
@@ -3046,7 +3329,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
           <div v-else-if="flatKeys.length === 0 && !loading" class="flex-1 flex flex-col items-center justify-center text-muted-foreground text-xs p-4 text-center">
             <template v-if="hasMore">
               <span class="mb-3">{{ t("redis.noKeysInScanHint") }}</span>
-              <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="loadingMore || searchPending || deletingKeys" @click="loadMore()">
+              <Button variant="outline" size="sm" class="h-7 text-xs" :disabled="loadingMore || searchPending || mutatingKeys" @click="loadMore()">
                 <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
                 {{ t("redis.loadMoreKeys") }}
               </Button>
@@ -3145,11 +3428,11 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             {{ t("redis.fuzzyTreeLimit", { count: flatKeys.length }) }}
           </div>
           <div v-if="hasMore && !isFetchingAll" class="shrink-0 border-t px-2 py-1.5 flex items-center gap-1.5">
-            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loadingMore || loading || searchPending || deletingKeys" @click="loadMore()">
+            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loadingMore || loading || searchPending || mutatingKeys" @click="loadMore()">
               <Loader2 v-if="loadingMore" class="w-3 h-3 mr-1.5 animate-spin" />
               {{ t("redis.loadMoreKeys") }}
             </Button>
-            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loading || searchPending || deletingKeys || !hasMore" @click="fetchAll">
+            <Button variant="outline" size="sm" class="h-7 text-xs flex-1" :disabled="loading || searchPending || mutatingKeys || !hasMore" @click="fetchAll">
               {{ t("redis.fetchAllKeys") }}
             </Button>
           </div>
@@ -3157,7 +3440,7 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
             <div class="text-xs text-muted-foreground text-center">
               {{ fetchAllProgressText }}
             </div>
-            <Button variant="destructive" size="sm" class="h-7 text-xs w-full" :disabled="fetchAllStopRequested || deletingKeys" @click="stopFetchAll">
+            <Button variant="destructive" size="sm" class="h-7 text-xs w-full" :disabled="fetchAllStopRequested || mutatingKeys" @click="stopFetchAll">
               {{ t("redis.stopFetchAll") }}
             </Button>
           </div>
@@ -3187,9 +3470,23 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
                   {{ t("redis.slowlog") }}
                 </TabsTrigger>
               </TabsList>
-              <Button v-if="activeSidePanel === 'command'" variant="ghost" size="icon" class="h-6 w-6" :title="t('redis.clearHistory')" @click="clearInMemoryHistory">
-                <History class="size-3.5" />
-              </Button>
+              <div v-if="activeSidePanel === 'command'" class="flex shrink-0 items-center gap-1">
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="h-6 w-6"
+                  :class="props.blockDangerousRedisCommands ? 'text-orange-600 bg-orange-100 dark:text-orange-300 dark:bg-orange-900/30' : 'text-muted-foreground/50'"
+                  :aria-label="t('toolbar.blockDangerousRedisCommands')"
+                  :aria-pressed="props.blockDangerousRedisCommands"
+                  :title="t('toolbar.blockDangerousRedisCommands')"
+                  @click="settingsStore.updateEditorSettings({ blockDangerousRedisCommands: !props.blockDangerousRedisCommands })"
+                >
+                  <Shield class="size-3.5" />
+                </Button>
+                <Button variant="ghost" size="icon" class="h-6 w-6" :title="t('redis.clearHistory')" @click="clearInMemoryHistory">
+                  <Trash2 class="size-3.5" />
+                </Button>
+              </div>
             </div>
 
             <TabsContent value="detail" class="m-0 min-h-0 flex-1 flex flex-col">
@@ -3295,6 +3592,49 @@ defineExpose({ focusSearch, insertCommand, executeCommand: executeAiCommand });
     </Splitpanes>
 
     <DangerConfirmDialog v-model:open="showDangerConfirm" :message="dangerMessage" :details="dangerDetails" :confirm-label="dangerConfirmLabel" :loading="deletingKeys" :close-on-confirm="pendingDanger?.kind !== 'delete-keys'" @confirm="applyDangerAction" />
+
+    <Dialog :open="showBatchExpiryDialog" @update:open="onBatchExpiryDialogOpenChange">
+      <DialogContent class="sm:max-w-[420px]">
+        <DialogHeader>
+          <DialogTitle>{{ t("redis.batchExpiryTitle") }}</DialogTitle>
+        </DialogHeader>
+
+        <div class="grid gap-3">
+          <p v-if="batchExpiryKeyRaws.length > 0" class="text-xs text-muted-foreground">{{ t("redis.batchExpirySelected", { count: batchExpiryKeyRaws.length }) }}</p>
+          <div class="grid gap-1.5 text-xs font-medium">
+            <span>{{ t("redis.expiry") }}</span>
+            <Select v-model="batchExpiryMode" :disabled="savingBatchExpiry">
+              <SelectTrigger class="h-8 text-xs" data-redis-batch-expiry-mode>
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent data-redis-expiry-mode-content>
+                <SelectItem value="none">{{ t("redis.expiryNone") }}</SelectItem>
+                <SelectItem value="ttl">{{ t("redis.expiryTtl") }}</SelectItem>
+                <SelectItem value="at">{{ t("redis.expiryAt") }}</SelectItem>
+              </SelectContent>
+            </Select>
+            <label v-if="batchExpiryMode === 'ttl'" class="grid gap-1.5 text-xs font-medium">
+              <span>{{ t("redis.createKeyTtl") }}</span>
+              <Input v-model="batchExpiryTtl" data-redis-batch-expiry-ttl class="dbx-editor-font-family h-8 text-xs" :disabled="savingBatchExpiry" inputmode="numeric" :placeholder="t('redis.createKeyTtlPlaceholder')" @keydown.enter="saveBatchExpiry" />
+            </label>
+            <label v-else-if="batchExpiryMode === 'at'" class="grid gap-1.5 text-xs font-medium">
+              <span>{{ t("redis.expiryAt") }}</span>
+              <DateTimePicker v-model="batchExpiryExpireAt" full-width :locale="locale" :disabled="savingBatchExpiry" />
+            </label>
+          </div>
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" :disabled="savingBatchExpiry" @click="showBatchExpiryDialog = false">
+            {{ t("dangerDialog.cancel") }}
+          </Button>
+          <Button :disabled="savingBatchExpiry || batchExpiryKeyRaws.length === 0" data-redis-batch-expiry-apply @click="saveBatchExpiry">
+            <Loader2 v-if="savingBatchExpiry" class="h-4 w-4 animate-spin" />
+            {{ t("redis.batchExpiryApply") }}
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
 
     <Dialog :open="showCreateKeyDialog" @update:open="onCreateKeyDialogOpenChange">
       <DialogContent class="sm:max-w-md" :show-close-button="!creatingKey" :style="editorFontFamilyStyle">

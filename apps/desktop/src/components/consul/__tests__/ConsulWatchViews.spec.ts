@@ -253,7 +253,7 @@ describe("Consul Catalog and Health watch views", () => {
   });
 
   it("starts with KV and keeps the cluster overview as a sidebar surface", () => {
-    expect(workspace).toContain('const activeTab = ref<WorkspaceTab>("kv");');
+    expect(workspace).toContain('const activeTab = ref<WorkspaceTab>(restoredUiState.activeTab ?? "kv");');
     expect(workspace).not.toContain('<TabsTrigger value="overview"');
     expect(workspace).not.toContain('<TabsContent value="overview"');
   });

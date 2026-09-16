@@ -6,10 +6,11 @@ use crate::connection::{
 use crate::db;
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query::{agent_execute_query_params, should_discard_pool_after_error, QueryExecutionOptions};
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::future::Future;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 mod kingbase;
@@ -765,6 +766,9 @@ async fn list_databases_once(state: &AppState, connection_id: &str) -> Result<Ve
         }
         PoolKind::Mysql(p, mode) if *mode == MysqlMode::OceanBaseOracle => db::ob_oracle::list_databases(p).await,
         PoolKind::Mysql(p, _) => db::mysql::list_databases_with_timeout(p, mysql_database_list_timeout).await,
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) => {
+            db::postgres::list_opengauss_databases(p).await
+        }
         PoolKind::Postgres(p) => db::postgres::list_databases(p).await,
         PoolKind::Sqlite(p) => db::sqlite::list_databases(p).await,
         PoolKind::Rqlite(client) => db::rqlite_driver::list_databases(client).await,
@@ -3408,6 +3412,10 @@ mod tests {
             gbase_server: String::new(),
             informix_server: String::new(),
             external_config: None,
+            plugin_id: None,
+            plugin_connection_provider: None,
+            plugin_connection_type: None,
+            connection_secrets: HashMap::new(),
             jdbc_driver_class: None,
             jdbc_driver_paths: Vec::new(),
             one_time: false,
@@ -3635,8 +3643,14 @@ done
                     kind: "external".to_string(),
                     database_type: Some("jdbc".to_string()),
                 }],
+                ..PluginManifest::default()
             },
             path: dir.clone(),
+            compatibility: crate::plugins::PluginCompatibility {
+                compatible: true,
+                backend_executable: Some(dir.join("plugin.sh")),
+                ..Default::default()
+            },
         };
         let session = std::sync::Arc::new(
             PluginDriverSession::start_for_test(plugin, "jdbc".to_string(), PluginRuntimeEnv::default()).await.unwrap(),
@@ -5805,7 +5819,26 @@ pub async fn completion_assistant_search_core(
                 PoolKind::Postgres(pool) => Some(pool.clone()),
                 _ => None,
             }) {
-                return db::postgres::completion_assistant_search(&pool, &request).await;
+                let db_config = connection_config(state, &request.connection_id).await;
+                if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss)
+                    && request.parent_name.as_deref().is_some_and(|name| !name.trim().is_empty())
+                    && request.object_kinds.iter().any(db::CompletionAssistantObjectKind::is_routine_like)
+                {
+                    let response = db::postgres::opengauss_package_members(&pool, &request).await?;
+                    // fallback_used marks "parent is not a package": continue with
+                    // the ordinary routine completion instead of returning nothing.
+                    if !response.fallback_used {
+                        return Ok(response);
+                    }
+                }
+                return if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) {
+                    // openGauss variant excludes package/private members from the
+                    // ordinary routine lookup, so the fallback stays consistent
+                    // with the package-aware path above.
+                    db::postgres::opengauss_completion_assistant_search(&pool, &request).await
+                } else {
+                    db::postgres::completion_assistant_search(&pool, &request).await
+                };
             }
         }
 
@@ -6316,9 +6349,29 @@ async fn list_objects_once(
             let include_routines = object_types_include_routines(object_types);
             let include_custom_types = db_config.as_ref().is_some_and(supports_pg_custom_type_objects)
                 && object_types_include_custom_types(object_types);
-            db::postgres::list_objects(p, schema, include_relations, include_routines, include_custom_types)
-                .await
-                .map(unpaged_object_list)
+            let mut objects = if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) {
+                // openGauss variant excludes package members (propackage=true)
+                // from the top-level routine list; they are surfaced under
+                // their PACKAGE nodes below.
+                db::postgres::list_opengauss_objects(
+                    p,
+                    schema,
+                    include_relations,
+                    include_routines,
+                    include_custom_types,
+                )
+                .await?
+            } else {
+                db::postgres::list_objects(p, schema, include_relations, include_routines, include_custom_types).await?
+            };
+            if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) {
+                let (include_package_spec, include_package_body) = object_types_include_packages(object_types);
+                objects.extend(
+                    db::postgres::list_opengauss_packages(p, schema, include_package_spec, include_package_body)
+                        .await?,
+                );
+            }
+            Ok(unpaged_object_list(objects))
         }
         _ => Ok(unpaged_object_list(
             list_tables_core(state, connection_id, database, schema, None, None, None, None, None)
@@ -6445,6 +6498,11 @@ async fn list_completion_objects_once(
         PoolKind::Postgres(p) if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::Redshift) => {
             db::postgres::list_redshift_objects(p, schema, false, true).await.map(filter_completion_objects)
         }
+        PoolKind::Postgres(p) if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss) => {
+            let mut objects = db::postgres::list_opengauss_objects(p, schema, false, true, false).await?;
+            objects.extend(db::postgres::list_opengauss_packages(p, schema, true, true).await?);
+            Ok(filter_completion_objects_with_packages(objects))
+        }
         PoolKind::Postgres(p) => {
             db::postgres::list_objects(p, schema, true, true, false).await.map(filter_completion_objects)
         }
@@ -6463,6 +6521,19 @@ fn filter_completion_objects(objects: Vec<db::ObjectInfo>) -> Vec<db::ObjectInfo
         .filter(|object| {
             let object_type = object.object_type.to_ascii_uppercase();
             object_type.contains("PROCEDURE") || object_type.contains("FUNCTION") || object_type.contains("TRIGGER")
+        })
+        .collect()
+}
+
+fn filter_completion_objects_with_packages(objects: Vec<db::ObjectInfo>) -> Vec<db::ObjectInfo> {
+    objects
+        .into_iter()
+        .filter(|object| {
+            let object_type = object.object_type.to_ascii_uppercase();
+            object_type.contains("PROCEDURE")
+                || object_type.contains("FUNCTION")
+                || object_type.contains("TRIGGER")
+                || object_type == "PACKAGE"
         })
         .collect()
 }
@@ -7549,16 +7620,193 @@ pub async fn list_functions_core(
     database: &str,
     schema: &str,
 ) -> Result<Vec<db::FunctionInfo>, String> {
-    retry_metadata_connection(state, connection_id, Some(database), || async {
+    let postgres_functions = retry_metadata_connection(state, connection_id, Some(database), || async {
         let pool_key = state.get_or_create_metadata_pool_for_session(connection_id, Some(database), None).await?;
         let pool = clone_metadata_pool(state, &pool_key).await.ok_or("Pool not found")?;
 
         match &pool {
-            PoolKind::Postgres(p) => db::postgres::list_functions(p, schema).await,
-            _ => Ok(vec![]),
+            PoolKind::Postgres(p) => Ok(Some(db::postgres::list_functions(p, schema).await?)),
+            _ => Ok(None),
         }
     })
+    .await?;
+
+    if let Some(functions) = postgres_functions {
+        return Ok(functions);
+    }
+
+    // Non-Postgres: reuse sidebar list_objects + get_object_source paths.
+    list_functions_via_objects(state, connection_id, database, schema).await
+}
+
+/// Build FunctionInfo for non-Postgres pools by reusing list_objects + get_object_source
+/// (same paths the sidebar uses for PROCEDURE/FUNCTION).
+async fn list_functions_via_objects(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+) -> Result<Vec<db::FunctionInfo>, String> {
+    let object_types = ["PROCEDURE".to_string(), "FUNCTION".to_string()];
+    let objects =
+        list_objects_core(state, connection_id, database, schema, None, None, None, Some(&object_types), None).await?;
+
+    // Bound concurrent get_object_source calls (N+1) without requiring AppState: Clone.
+    const CONCURRENCY: usize = 8;
+    let mut functions = Vec::with_capacity(objects.len());
+    for chunk in objects.chunks(CONCURRENCY) {
+        let chunk_results = futures::future::join_all(
+            chunk
+                .iter()
+                .map(|object| load_function_info_via_object(state, connection_id, database, schema, object.clone())),
+        )
+        .await;
+        functions.extend(chunk_results.into_iter().flatten());
+    }
+
+    Ok(functions)
+}
+
+fn schema_diff_routine_kind(object_type: &str) -> Option<(&'static str, db::ObjectSourceKind)> {
+    let object_type_upper = object_type.to_ascii_uppercase();
+    if object_type_upper.contains("PROC") {
+        Some(("PROCEDURE", db::ObjectSourceKind::Procedure))
+    } else if object_type_upper.contains("FUNC") {
+        Some(("FUNCTION", db::ObjectSourceKind::Function))
+    } else {
+        None
+    }
+}
+
+async fn load_function_info_via_object(
+    state: &AppState,
+    connection_id: &str,
+    database: &str,
+    schema: &str,
+    object: db::ObjectInfo,
+) -> Option<db::FunctionInfo> {
+    let (function_type, source_kind) = schema_diff_routine_kind(&object.object_type)?;
+
+    let definition = match get_object_source_core(
+        state,
+        connection_id,
+        database,
+        schema,
+        &object.name,
+        source_kind.clone(),
+        object.signature.as_deref(),
+        None,
+    )
     .await
+    {
+        Ok(source) if !source.source.trim().is_empty() => source.source,
+        Ok(_) | Err(_) => {
+            // Retry the alternate routine kind when the primary getter is empty/fails.
+            let alternate = match source_kind {
+                db::ObjectSourceKind::Procedure => db::ObjectSourceKind::Function,
+                db::ObjectSourceKind::Function => db::ObjectSourceKind::Procedure,
+                other => other,
+            };
+            match get_object_source_core(
+                state,
+                connection_id,
+                database,
+                schema,
+                &object.name,
+                alternate,
+                object.signature.as_deref(),
+                None,
+            )
+            .await
+            {
+                Ok(source) if !source.source.trim().is_empty() => source.source,
+                // Skip objects with no readable source so empty definitions are not treated as loaded.
+                _ => return None,
+            }
+        }
+    };
+
+    Some(db::FunctionInfo {
+        name: object.name,
+        function_type: function_type.to_string(),
+        data_type: String::new(),
+        definition: strip_routine_definer_clause(&definition),
+        arguments: object.signature.unwrap_or_default(),
+    })
+}
+
+/// MySQL's SHOW CREATE PROCEDURE/FUNCTION prefixes `CREATE DEFINER=`user`@`host``.
+/// The definer account typically differs across same-structure databases on
+/// different servers while the routine body is identical, so drop the clause
+/// before schema-diff comparison (same spirit as DBeaver's removeDefiner
+/// option). Definitions without the clause pass through unchanged; the
+/// `^CREATE DEFINER` anchor keeps definer mentions inside a routine body alone.
+fn strip_routine_definer_clause(definition: &str) -> String {
+    static DEFINER_PREFIX: OnceLock<Regex> = OnceLock::new();
+    let definer_prefix = DEFINER_PREFIX.get_or_init(|| {
+        Regex::new(r#"(?is)^\s*CREATE\s+DEFINER\s*=\s*(`(?:[^`]|``)*`|"(?:[^"]|"")*"|[A-Za-z0-9_$]+)@(`(?:[^`]|``)*`|"(?:[^"]|"")*"|[A-Za-z0-9_$.%*-]+)"#).unwrap()
+    });
+    match definer_prefix.find(definition) {
+        Some(found) => format!("CREATE {}", definition[found.end()..].trim_start()),
+        None => definition.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod schema_diff_routine_kind_tests {
+    use super::schema_diff_routine_kind;
+    use crate::db::ObjectSourceKind;
+
+    #[test]
+    fn classifies_procedure_and_function_object_types() {
+        assert_eq!(schema_diff_routine_kind("PROCEDURE"), Some(("PROCEDURE", ObjectSourceKind::Procedure)));
+        assert_eq!(schema_diff_routine_kind("StoredProc"), Some(("PROCEDURE", ObjectSourceKind::Procedure)));
+        assert_eq!(schema_diff_routine_kind("FUNCTION"), Some(("FUNCTION", ObjectSourceKind::Function)));
+        assert_eq!(schema_diff_routine_kind("user_function"), Some(("FUNCTION", ObjectSourceKind::Function)));
+        assert!(schema_diff_routine_kind("TABLE").is_none());
+        assert!(schema_diff_routine_kind("VIEW").is_none());
+    }
+}
+
+#[cfg(test)]
+mod strip_routine_definer_clause_tests {
+    use super::strip_routine_definer_clause;
+
+    #[test]
+    fn strips_backquoted_definer_prefix() {
+        assert_eq!(
+            strip_routine_definer_clause("CREATE DEFINER=`root`@`localhost` PROCEDURE `p`() BEGIN SELECT 1; END"),
+            "CREATE PROCEDURE `p`() BEGIN SELECT 1; END"
+        );
+    }
+
+    #[test]
+    fn strips_bare_definer_prefix() {
+        assert_eq!(
+            strip_routine_definer_clause("CREATE DEFINER=app_user@10.0.0.% FUNCTION `f`() RETURNS int RETURN 1"),
+            "CREATE FUNCTION `f`() RETURNS int RETURN 1"
+        );
+    }
+
+    #[test]
+    fn keeps_definitions_without_definer() {
+        let def = "CREATE PROCEDURE `p`() BEGIN SELECT 1; END";
+        assert_eq!(strip_routine_definer_clause(def), def);
+    }
+
+    #[test]
+    fn keeps_definer_mentions_inside_the_body() {
+        let def = "CREATE PROCEDURE `p`() BEGIN -- CREATE DEFINER=`x`@`y` stays\nSELECT 1; END";
+        assert_eq!(strip_routine_definer_clause(def), def);
+    }
+
+    #[test]
+    fn strips_definer_after_leading_whitespace() {
+        assert_eq!(
+            strip_routine_definer_clause("  CREATE DEFINER=`root`@`%` PROCEDURE `p`() BEGIN END"),
+            "CREATE PROCEDURE `p`() BEGIN END"
+        );
+    }
 }
 
 pub async fn list_sequences_core(
@@ -8104,6 +8352,16 @@ fn object_types_include_routines(object_types: Option<&[String]>) -> bool {
 fn object_types_include_custom_types(object_types: Option<&[String]>) -> bool {
     object_types
         .is_none_or(|types| types.iter().any(|t| t.eq_ignore_ascii_case("TYPE") || t.eq_ignore_ascii_case("TYPE_BODY")))
+}
+
+fn object_types_include_packages(object_types: Option<&[String]>) -> (bool, bool) {
+    match object_types {
+        None => (true, true),
+        Some(types) => (
+            types.iter().any(|value| value.eq_ignore_ascii_case("PACKAGE")),
+            types.iter().any(|value| value.eq_ignore_ascii_case("PACKAGE_BODY")),
+        ),
+    }
 }
 
 /// Whether the object-type filter exclusively asks for user-defined types.
@@ -9285,6 +9543,18 @@ async fn get_object_source_once(
                     mysql_object_source(pool, mysql_table_metadata_catalog(database, schema), name, &object_type)
                         .await?
                 }
+                PoolKind::Postgres(pool)
+                    if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss)
+                        && matches!(object_type, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody) =>
+                {
+                    db::postgres::opengauss_package_source(
+                        pool,
+                        schema,
+                        name,
+                        matches!(object_type, db::ObjectSourceKind::PackageBody),
+                    )
+                    .await?
+                }
                 PoolKind::Postgres(pool) if db_config.as_ref().is_some_and(is_questdb_config) => {
                     // only view
                     db::questdb::questdb_object_source(pool, name).await?
@@ -9339,7 +9609,14 @@ async fn get_object_source_once(
         }
     };
 
-    let editable = if matches!(object_type, db::ObjectSourceKind::Trigger)
+    let editable = if db_config.as_ref().is_some_and(|config| config.db_type == DatabaseType::OpenGauss)
+        && matches!(object_type, db::ObjectSourceKind::Package | db::ObjectSourceKind::PackageBody)
+    {
+        // gs_source returns the original CREATE text. Re-executing CREATE for an
+        // existing package is not a safe edit operation unless the user changes
+        // it to CREATE OR REPLACE explicitly, so keep the initial implementation read-only.
+        Some(false)
+    } else if matches!(object_type, db::ObjectSourceKind::Trigger)
         && db_config.as_ref().is_some_and(|config| {
             matches!(
                 config.db_type,
@@ -9354,7 +9631,8 @@ async fn get_object_source_once(
                     | DatabaseType::Uxdb
                     | DatabaseType::Vastbase
             )
-        }) {
+        })
+    {
         Some(false)
     } else {
         None
@@ -10373,6 +10651,113 @@ mod ddl_tests {
     }
 
     #[test]
+    fn postgres_table_ddl_preserves_named_unique_and_primary_constraints() {
+        let mut id = column("id", "bigint");
+        id.is_nullable = false;
+        id.is_primary_key = true;
+        let indexes = vec![
+            db::IndexInfo {
+                name: "pk_accounts".to_string(),
+                columns: vec!["id".to_string()],
+                is_unique: true,
+                is_primary: true,
+                filter: None,
+                index_type: Some("btree".to_string()),
+                included_columns: None,
+                comment: None,
+                key_is_expression: Vec::new(),
+                column_opclasses: Vec::new(),
+                key_options: Vec::new(),
+                constraint_backed: true,
+            },
+            db::IndexInfo {
+                name: "uq_accounts_code".to_string(),
+                columns: vec!["code".to_string()],
+                is_unique: true,
+                is_primary: false,
+                filter: None,
+                index_type: Some("btree".to_string()),
+                included_columns: None,
+                comment: None,
+                key_is_expression: Vec::new(),
+                column_opclasses: Vec::new(),
+                key_options: Vec::new(),
+                constraint_backed: true,
+            },
+            db::IndexInfo {
+                name: "idx_accounts_display_name".to_string(),
+                columns: vec!["display_name".to_string()],
+                is_unique: true,
+                is_primary: false,
+                filter: None,
+                index_type: Some("btree".to_string()),
+                included_columns: None,
+                comment: None,
+                key_is_expression: Vec::new(),
+                column_opclasses: Vec::new(),
+                key_options: Vec::new(),
+                constraint_backed: false,
+            },
+        ];
+        let constraints = vec![
+            db::ConstraintInfo {
+                name: "pk_accounts".to_string(),
+                constraint_type: "PRIMARY KEY".to_string(),
+                definition: "PRIMARY KEY (id)".to_string(),
+                columns: vec!["id".to_string()],
+                ref_schema: None,
+                ref_table: None,
+                ref_columns: Vec::new(),
+                match_type: None,
+                on_update: None,
+                on_delete: None,
+                deferrable: false,
+                initially_deferred: false,
+                enabled: true,
+                valid: true,
+            },
+            db::ConstraintInfo {
+                name: "uq_accounts_code".to_string(),
+                constraint_type: "UNIQUE".to_string(),
+                definition: "UNIQUE (code) DEFERRABLE INITIALLY DEFERRED".to_string(),
+                columns: vec!["code".to_string()],
+                ref_schema: None,
+                ref_table: None,
+                ref_columns: Vec::new(),
+                match_type: None,
+                on_update: None,
+                on_delete: None,
+                deferrable: true,
+                initially_deferred: true,
+                enabled: true,
+                valid: true,
+            },
+        ];
+
+        let ddl = render_postgres_table_ddl_with_constraints_and_partition_info(
+            "public",
+            "accounts",
+            &[id],
+            &indexes,
+            &[],
+            &constraints,
+            &[],
+            None,
+            &db::postgres::PostgresTablePartitionInfo::default(),
+            &db::postgres::PostgresTablePartitionLocalObjects::default(),
+        );
+
+        assert!(ddl.contains("CONSTRAINT \"pk_accounts\" PRIMARY KEY (id)"), "ddl: {ddl}");
+        assert!(
+            ddl.contains("CONSTRAINT \"uq_accounts_code\" UNIQUE (code) DEFERRABLE INITIALLY DEFERRED"),
+            "ddl: {ddl}"
+        );
+        assert!(!ddl.contains("CREATE UNIQUE INDEX \"pk_accounts\""), "ddl: {ddl}");
+        assert!(!ddl.contains("CREATE UNIQUE INDEX \"uq_accounts_code\""), "ddl: {ddl}");
+        assert!(ddl.contains("CREATE UNIQUE INDEX \"idx_accounts_display_name\""), "ddl: {ddl}");
+    }
+
+    #[test]
     fn postgres_table_ddl_renders_owned_serial_markers_without_external_defaults() {
         for (column_name, data_type, serial_type) in [
             ("small\"id", "smallint", "smallserial"),
@@ -10543,6 +10928,68 @@ mod ddl_tests {
         assert!(ddl.contains("FOR VALUES FROM ('2026-01-01') TO ('2027-01-01') PARTITION BY HASH (payload);"));
         assert!(ddl.contains("CREATE INDEX \"events_payload_idx\""));
         assert!(!ddl.contains("\"payload\" text"));
+    }
+
+    #[test]
+    fn postgres_partition_ddl_preserves_local_unique_without_local_primary_key() {
+        let indexes = vec![db::IndexInfo {
+            name: "events_2026_code_key".to_string(),
+            columns: vec!["code".to_string()],
+            is_unique: true,
+            is_primary: false,
+            filter: None,
+            index_type: Some("btree".to_string()),
+            included_columns: None,
+            comment: None,
+            key_is_expression: Vec::new(),
+            column_opclasses: Vec::new(),
+            key_options: Vec::new(),
+            constraint_backed: true,
+        }];
+        let constraints = vec![db::ConstraintInfo {
+            name: "events_2026_code_key".to_string(),
+            constraint_type: "UNIQUE".to_string(),
+            definition: "UNIQUE (code)".to_string(),
+            columns: vec!["code".to_string()],
+            ref_schema: None,
+            ref_table: None,
+            ref_columns: Vec::new(),
+            match_type: None,
+            on_update: None,
+            on_delete: None,
+            deferrable: false,
+            initially_deferred: false,
+            enabled: true,
+            valid: true,
+        }];
+        let partition_info = db::postgres::PostgresTablePartitionInfo {
+            is_partition: true,
+            parent_schema: Some("public".to_string()),
+            parent_table: Some("events".to_string()),
+            bound: Some("DEFAULT".to_string()),
+            ..Default::default()
+        };
+        let partition_local_objects = db::postgres::PostgresTablePartitionLocalObjects {
+            unique_constraints: BTreeSet::from(["events_2026_code_key".to_string()]),
+            indexes: BTreeSet::from(["events_2026_code_key".to_string()]),
+            ..Default::default()
+        };
+
+        let ddl = render_postgres_table_ddl_with_constraints_and_partition_info(
+            "public",
+            "events_2026",
+            &[column("code", "text")],
+            &indexes,
+            &[],
+            &constraints,
+            &[],
+            None,
+            &partition_info,
+            &partition_local_objects,
+        );
+
+        assert!(ddl.contains("CONSTRAINT \"events_2026_code_key\" UNIQUE (code)"), "ddl: {ddl}");
+        assert!(!ddl.contains("CREATE UNIQUE INDEX"), "ddl: {ddl}");
     }
 
     #[test]
@@ -11394,15 +11841,17 @@ pub async fn sqlite_ddl(pool: &db::sqlite::SqliteHandle, schema: &str, table: &s
 /// duplicate every partition's `CREATE TABLE` (once from the parent's DDL,
 /// once from the caller's own loop over that same child relation).
 pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -> Result<String, String> {
-    let (columns, indexes, fkeys, table_comment, partition_info, trigger_definitions, check_constraints) = tokio::try_join!(
-        db::postgres::get_columns(pool, schema, table),
-        db::postgres::list_indexes(pool, schema, table),
-        db::postgres::list_foreign_keys(pool, schema, table),
-        async { db::postgres::get_table_comment(pool, schema, table).await },
-        db::postgres::get_table_partition_info(pool, schema, table),
-        db::postgres::list_trigger_definitions(pool, schema, table),
-        db::postgres::list_check_constraints(pool, schema, table),
-    )?;
+    let (columns, indexes, fkeys, constraints, table_comment, partition_info, trigger_definitions, check_constraints) =
+        tokio::try_join!(
+            db::postgres::get_columns(pool, schema, table),
+            db::postgres::list_indexes(pool, schema, table),
+            db::postgres::list_foreign_keys(pool, schema, table),
+            db::postgres::list_constraints(pool, schema, table),
+            async { db::postgres::get_table_comment(pool, schema, table).await },
+            db::postgres::get_table_partition_info(pool, schema, table),
+            db::postgres::list_trigger_definitions(pool, schema, table),
+            db::postgres::list_check_constraints(pool, schema, table),
+        )?;
     let partition_local_objects = if partition_info.is_partition {
         db::postgres::get_table_partition_local_objects(pool, schema, table).await?
     } else {
@@ -11410,12 +11859,13 @@ pub async fn pg_ddl(pool: &deadpool_postgres::Pool, schema: &str, table: &str) -
     };
 
     Ok(append_postgres_trigger_definitions(
-        render_postgres_table_ddl_with_partition_info(
+        render_postgres_table_ddl_with_constraints_and_partition_info(
             schema,
             table,
             &columns,
             &indexes,
             &fkeys,
+            &constraints,
             &check_constraints,
             table_comment.as_deref(),
             &partition_info,
@@ -12170,6 +12620,32 @@ fn render_postgres_table_ddl_with_partition_info(
     partition_info: &db::postgres::PostgresTablePartitionInfo,
     partition_local_objects: &db::postgres::PostgresTablePartitionLocalObjects,
 ) -> String {
+    render_postgres_table_ddl_with_constraints_and_partition_info(
+        schema,
+        table,
+        columns,
+        indexes,
+        fkeys,
+        &[],
+        check_constraints,
+        table_comment,
+        partition_info,
+        partition_local_objects,
+    )
+}
+
+fn render_postgres_table_ddl_with_constraints_and_partition_info(
+    schema: &str,
+    table: &str,
+    columns: &[db::ColumnInfo],
+    indexes: &[db::IndexInfo],
+    fkeys: &[db::ForeignKeyInfo],
+    constraints: &[db::ConstraintInfo],
+    check_constraints: &[(String, String)],
+    table_comment: Option<&str>,
+    partition_info: &db::postgres::PostgresTablePartitionInfo,
+    partition_local_objects: &db::postgres::PostgresTablePartitionLocalObjects,
+) -> String {
     let table_name = format!("{}.{}", pg_ident(schema), pg_ident(table));
     let partition_parent = partition_info
         .is_partition
@@ -12216,14 +12692,38 @@ fn render_postgres_table_ddl_with_partition_info(
             .collect::<Vec<_>>()
     };
 
-    let pks: Vec<&str> = if !is_partition || partition_local_objects.has_primary_key {
-        columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.as_str()).collect()
-    } else {
-        Vec::new()
-    };
-    if !pks.is_empty() {
-        definition_lines
-            .push(format!("  PRIMARY KEY ({})", pks.iter().map(|key| pg_ident(key)).collect::<Vec<_>>().join(", ")));
+    let primary_constraints = constraints
+        .iter()
+        .filter(|constraint| constraint.constraint_type == "PRIMARY KEY" && !constraint.definition.trim().is_empty())
+        .collect::<Vec<_>>();
+    let unique_constraints = constraints
+        .iter()
+        .filter(|constraint| constraint.constraint_type == "UNIQUE" && !constraint.definition.trim().is_empty())
+        .collect::<Vec<_>>();
+    if !is_partition || partition_local_objects.has_primary_key {
+        if primary_constraints.is_empty() {
+            let pks: Vec<&str> = columns.iter().filter(|c| c.is_primary_key).map(|c| c.name.as_str()).collect();
+            if !pks.is_empty() {
+                definition_lines.push(format!(
+                    "  PRIMARY KEY ({})",
+                    pks.iter().map(|key| pg_ident(key)).collect::<Vec<_>>().join(", ")
+                ));
+            }
+        } else {
+            for constraint in &primary_constraints {
+                definition_lines.push(format!(
+                    "  CONSTRAINT {} {}",
+                    pg_ident(&constraint.name),
+                    constraint.definition.trim()
+                ));
+            }
+        }
+    }
+    for constraint in unique_constraints {
+        if is_partition && !partition_local_objects.unique_constraints.contains(&constraint.name) {
+            continue;
+        }
+        definition_lines.push(format!("  CONSTRAINT {} {}", pg_ident(&constraint.name), constraint.definition.trim()));
     }
     for fk_group in group_foreign_keys_by_name(fkeys) {
         let Some(first_fk) = fk_group.first() else {
@@ -12343,7 +12843,7 @@ fn render_postgres_table_ddl_with_partition_info(
     }
 
     for idx in indexes {
-        if idx.is_primary {
+        if idx.is_primary || idx.constraint_backed {
             continue;
         }
         if is_partition && !partition_local_objects.indexes.contains(&idx.name) {

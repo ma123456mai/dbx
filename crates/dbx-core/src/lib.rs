@@ -49,6 +49,7 @@ pub mod docs;
 pub mod document_ops;
 pub mod driver_runtime;
 pub mod export_runtime;
+pub mod export_split_zip;
 pub mod external;
 pub mod hbase_ops;
 pub mod history;
@@ -58,6 +59,7 @@ pub mod models;
 pub mod mongo_oidc;
 pub mod mongo_ops;
 pub mod mongo_shell;
+pub mod mongodb_import_export;
 #[cfg(feature = "mq-admin")]
 pub mod mq;
 #[cfg(feature = "mq-admin")]
@@ -67,6 +69,7 @@ pub mod mysql_event_sql;
 pub mod nacos;
 #[cfg(all(target_os = "windows", target_env = "gnu"))]
 mod nanosleep_stub;
+pub mod object_cache;
 pub mod object_source_sql;
 pub mod path_utils;
 pub mod plugins;

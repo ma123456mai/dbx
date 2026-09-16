@@ -68,6 +68,10 @@ fn live_sqlserver_config(id: &str, database: &str) -> dbx_core::models::connecti
         gbase_server: String::new(),
         informix_server: String::new(),
         external_config: None,
+        plugin_id: None,
+        plugin_connection_provider: None,
+        plugin_connection_type: None,
+        connection_secrets: Default::default(),
         jdbc_driver_class: None,
         jdbc_driver_paths: Vec::new(),
         one_time: false,
@@ -1290,6 +1294,7 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
         database: database.clone(),
         file_path: "fixture.sql".to_string(),
         continue_on_error: false,
+        selected_tables: None,
     };
     let done_seen = AtomicBool::new(false);
 
