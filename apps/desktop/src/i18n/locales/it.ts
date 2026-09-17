@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { mongodbDatabaseDumpIt as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementIt } from "./meilisearchManagement";
 import { redisGroupingIt as redisGrouping } from "./redisGrouping";
 import docs from "./docs/it";
@@ -82,6 +83,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoDump,
   cellTransform: {
     title: "Anteprima conversione",
     description: "Converte il valore corrente per visualizzarlo o copiarlo. Il valore originale e la bozza restano invariati.",
@@ -6683,7 +6685,9 @@ export default withEnglishFallback({
     closeActionQuit: "Esci da DBX",
     closeActionMinimize: "Riduci a icona",
     updateNotificationsEnabled: "Abilita promemoria aggiornamenti",
-    updateNotificationsEnabledDescription: "Controlla gli aggiornamenti di app e driver e scarica quelli dell’app senza notifiche. Disattivando, controlli automatici, download e indicatori si fermano. Restano disponibili controlli manuali e installazione degli aggiornamenti scaricati.",
+    updateNotificationsEnabledDescription: "Controlla automaticamente gli aggiornamenti di app e driver e mostra promemoria. Disattivando, si fermano controlli e download automatici e indicatori. Puoi comunque controllare manualmente.",
+    autoDownloadUpdates: "Scarica automaticamente gli aggiornamenti dell’app",
+    autoDownloadUpdatesDescription: "Con i promemoria attivi, scarica automaticamente i pacchetti. L’installazione richiede conferma. Disattivato per impostazione predefinita; puoi scaricare manualmente e i download esistenti vengono conservati.",
     updateDownloadSource: "Fonte download aggiornamenti",
     updateDownloadSourceDescription: "Scegli da dove scaricare gli installer degli aggiornamenti. La fonte ufficiale è consigliata; CNB può essere più veloce sulle reti della Cina continentale.",
     updateDownloadSourceOfficial: "Fonte ufficiale (consigliata)",

@@ -4110,8 +4110,9 @@ function connectionConfigForSubmit(id: string, generatedName = "", validatePlugi
     config.keepalive_interval_secs = form.value.keepalive_interval_secs;
     config.read_only = form.value.read_only;
     config.save_password = form.value.save_password;
-    config.is_production = form.value.is_production;
-    config.production_databases = form.value.production_databases;
+    // 生产保护只拦截 SQL/数据编辑路径，插件连接走不到；表单已隐藏该区块，提交时清掉历史残留标志。
+    config.is_production = false;
+    config.production_databases = [];
   } else {
     config = { ...formValueForSubmit(), id } as LegacyConnectionConfig;
   }
@@ -9027,7 +9028,7 @@ function openExternalUrl(url: string) {
                     </p>
                   </div>
                 </div>
-                <div class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
+                <div v-if="!isPluginConnection" class="grid grid-cols-4 items-start gap-4 rounded-[6px] border border-red-500/25 bg-red-500/[0.035] px-3 py-2.5">
                   <Label :class="[connectionLabelSmallClass, 'pt-0.5 text-red-700 dark:text-red-300']">
                     <span class="inline-flex items-center justify-end gap-1"><ShieldAlert class="h-3.5 w-3.5" />PROD</span>
                   </Label>

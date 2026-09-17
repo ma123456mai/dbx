@@ -25,7 +25,7 @@ use crate::db::agent_driver::{AgentCallError, AgentErrorStage, AgentOperationOut
 use crate::models::connection::{ConnectionConfig, DatabaseType};
 use crate::query_execution_sql::{is_oracle_proven_read_only_statement, is_write_sql, strip_sql_comments_and_literals};
 use crate::sql::{split_sql_batches, split_sql_statements, starts_with_executable_sql_keyword_for_database};
-use crate::sql_dialect::{resolve_for_db, CAP_TRANSACTIONAL_DDL};
+use crate::sql_dialect::{quote_iris_identifier, resolve_for_db, CAP_TRANSACTIONAL_DDL};
 use crate::sql_risk::{classify_sql_risk_for_database, SqlRisk};
 
 pub const QUERY_TIMEOUT: Duration = Duration::from_secs(30);
@@ -907,7 +907,9 @@ fn sql_for_execution_context_with_identifier_quote(
         return sql.to_string();
     };
     match db_type {
-        Some(DatabaseType::Iris) => qualify_iris_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string()),
+        Some(DatabaseType::Iris) => {
+            qualify_iris_unqualified_dml(sql, schema, identifier_quote).unwrap_or_else(|| sql.to_string())
+        }
         Some(DatabaseType::SqlServer) => {
             qualify_sqlserver_unqualified_dml(sql, schema).unwrap_or_else(|| sql.to_string())
         }
@@ -918,13 +920,18 @@ fn sql_for_execution_context_with_identifier_quote(
     }
 }
 
-fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
+fn qualify_iris_unqualified_dml(sql: &str, schema: &str, identifier_quote: Option<&str>) -> Option<String> {
     let dialect = GenericDialect {};
     let mut statements = Parser::parse_sql(&dialect, sql).ok()?;
     if statements.is_empty() {
         return None;
     }
 
+    // Caché/IRIS installations may run with delimited identifiers disabled. The
+    // JDBC preparser then turns a double-quoted name into a `:%qpar` parameter,
+    // and the statement fails at prepare with "IDENTIFIER expected". Ordinary
+    // schema names are case-insensitive there, so they must stay unquoted.
+    let schema_identifier = Ident::new(quote_iris_identifier(schema, identifier_quote));
     let mut changed = false;
     for statement in &mut statements {
         if !statement_uses_schema_context(statement) {
@@ -933,7 +940,7 @@ fn qualify_iris_unqualified_dml(sql: &str, schema: &str) -> Option<String> {
         let cte_names = statement_cte_names(statement);
         let table_aliases = statement_table_aliases(statement);
         let _ = visit_relations_mut(statement, |name| {
-            if qualify_unqualified_relation_name(name, schema, &cte_names, &table_aliases) {
+            if qualify_unqualified_relation_name(name, &schema_identifier, &cte_names, &table_aliases) {
                 changed = true;
             }
             ControlFlow::<()>::Continue(())
@@ -958,8 +965,7 @@ fn qualify_sqlserver_unqualified_dml(sql: &str, schema: &str) -> Option<String> 
         let cte_names = statement_cte_names(statement);
         let table_aliases = statement_table_aliases(statement);
         let mut qualifier = SchemaRelationQualifier {
-            schema,
-            identifier_quote: '[',
+            schema_identifier: Ident::with_quote('[', schema),
             cte_names: &cte_names,
             table_aliases: &table_aliases,
             parameterized_table_depth: 0,
@@ -987,8 +993,7 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_qu
         let cte_names = statement_cte_names(statement);
         let table_aliases = statement_table_aliases(statement);
         let mut qualifier = SchemaRelationQualifier {
-            schema,
-            identifier_quote: identifier_quote_char(identifier_quote),
+            schema_identifier: Ident::with_quote(identifier_quote_char(identifier_quote), schema),
             cte_names: &cte_names,
             table_aliases: &table_aliases,
             parameterized_table_depth: 0,
@@ -1002,8 +1007,7 @@ fn qualify_kingbase_unqualified_relations(sql: &str, schema: &str, identifier_qu
 }
 
 struct SchemaRelationQualifier<'a> {
-    schema: &'a str,
-    identifier_quote: char,
+    schema_identifier: Ident,
     cte_names: &'a HashSet<String>,
     table_aliases: &'a HashSet<String>,
     parameterized_table_depth: usize,
@@ -1029,13 +1033,7 @@ impl VisitorMut for SchemaRelationQualifier<'_> {
 
     fn post_visit_relation(&mut self, relation: &mut ObjectName) -> ControlFlow<Self::Break> {
         if self.parameterized_table_depth == 0
-            && qualify_unqualified_relation_name_with_quote(
-                relation,
-                self.schema,
-                self.cte_names,
-                self.table_aliases,
-                self.identifier_quote,
-            )
+            && qualify_unqualified_relation_name(relation, &self.schema_identifier, self.cte_names, self.table_aliases)
         {
             self.changed = true;
         }
@@ -1054,21 +1052,14 @@ fn statement_uses_schema_context(statement: &Statement) -> bool {
     )
 }
 
+/// Qualify a single-part relation with `schema_identifier`, which is already
+/// rendered in the dialect's own spelling (quoted where the dialect needs it,
+/// unquoted where quoting would break parsing).
 fn qualify_unqualified_relation_name(
     name: &mut ObjectName,
-    schema: &str,
+    schema_identifier: &Ident,
     cte_names: &HashSet<String>,
     table_aliases: &HashSet<String>,
-) -> bool {
-    qualify_unqualified_relation_name_with_quote(name, schema, cte_names, table_aliases, '"')
-}
-
-fn qualify_unqualified_relation_name_with_quote(
-    name: &mut ObjectName,
-    schema: &str,
-    cte_names: &HashSet<String>,
-    table_aliases: &HashSet<String>,
-    identifier_quote: char,
 ) -> bool {
     let [ObjectNamePart::Identifier(table)] = name.0.as_slice() else {
         return false;
@@ -1082,10 +1073,7 @@ fn qualify_unqualified_relation_name_with_quote(
     }
 
     let table = table.clone();
-    name.0 = vec![
-        ObjectNamePart::Identifier(Ident::with_quote(identifier_quote, schema)),
-        ObjectNamePart::Identifier(table),
-    ];
+    name.0 = vec![ObjectNamePart::Identifier(schema_identifier.clone()), ObjectNamePart::Identifier(table)];
     true
 }
 
@@ -2073,6 +2061,7 @@ async fn do_execute_typed(
             let cancel_context = state.get_postgres_cancel_context(pool_key).await;
             let result = execute_postgres_pool_statement(
                 &p,
+                pool_db_type,
                 schema.as_deref(),
                 sql,
                 max_rows,
@@ -2092,6 +2081,7 @@ async fn do_execute_typed(
                     );
                     execute_postgres_pool_statement(
                         &p,
+                        pool_db_type,
                         schema.as_deref(),
                         &fallback_sql,
                         max_rows,
@@ -2574,6 +2564,7 @@ fn postgres_preview_fallback_retry_sql(options: &QueryExecutionOptions, error: &
 #[allow(clippy::too_many_arguments)]
 async fn execute_postgres_pool_statement(
     pool: &deadpool_postgres::Pool,
+    db_type: Option<DatabaseType>,
     schema: Option<&str>,
     sql: &str,
     max_rows: Option<usize>,
@@ -2597,6 +2588,7 @@ async fn execute_postgres_pool_statement(
     } else if let Some(schema) = schema {
         db::postgres::execute_query_with_schema_and_max_rows_and_cancel(
             pool,
+            db_type,
             schema,
             sql,
             max_rows,
@@ -4747,7 +4739,7 @@ pub async fn execute_statements_in_transaction_on_pool_typed(
     let result = match path {
         Some(BatchTransactionPath::Pg(pool)) => {
             let cancel_context = state.get_postgres_cancel_context(pool_key).await;
-            exec_tx_pg_inner(pool, statements, schema, start, operation_budget.clone(), cancel_context).await
+            exec_tx_pg_inner(pool, db_type, statements, schema, start, operation_budget.clone(), cancel_context).await
         }
         Some(BatchTransactionPath::Mysql(pool)) => exec_tx_mysql_inner(
             state,
@@ -4870,6 +4862,7 @@ fn batch_transaction_path(pool: &PoolKind) -> BatchTransactionPath {
 
 async fn exec_tx_pg_inner(
     pool: deadpool_postgres::Pool,
+    db_type: Option<DatabaseType>,
     statements: &[String],
     schema: Option<&str>,
     start: std::time::Instant,
@@ -4892,11 +4885,11 @@ async fn exec_tx_pg_inner(
     }
     let tx_result = exec_tx_pg_statements(&mut client, statements, &budget, cancel_context).await;
 
-    // Always reset search_path so the connection is clean when returned to the pool
+    // GaussDB/openGauss reject PostgreSQL's RESET search_path syntax.
     let reset_result = if had_schema {
         db::postgres::execute_postgres_infra_statement(
             &client,
-            "RESET search_path",
+            db::postgres::reset_search_path_sql(db_type),
             budget.cleanup_timeout,
             "schema.reset",
         )
@@ -10194,15 +10187,15 @@ for line in sys.stdin:
     fn iris_execution_context_qualifies_unqualified_dml_tables() {
         assert_eq!(
             sql_for_execution_context(Some(DatabaseType::Iris), "SELECT * FROM TABLES", Some("INFORMATION_SCHEMA")),
-            "SELECT * FROM \"INFORMATION_SCHEMA\".TABLES"
+            "SELECT * FROM INFORMATION_SCHEMA.TABLES"
         );
         let qualified_join = sql_for_execution_context(
             Some(DatabaseType::Iris),
             "SELECT * FROM orders o JOIN customers c ON c.id = o.customer_id",
             Some("Sales"),
         );
-        assert!(qualified_join.contains("FROM \"Sales\".orders"));
-        assert!(qualified_join.contains("JOIN \"Sales\".customers"));
+        assert!(qualified_join.contains("FROM Sales.orders"));
+        assert!(qualified_join.contains("JOIN Sales.customers"));
         assert!(qualified_join.contains("c.id = o.customer_id"));
         assert_eq!(
             sql_for_execution_context(Some(DatabaseType::Iris), "SELECT * FROM INFORMATION_SCHEMA.TABLES", Some("APP")),
@@ -10218,7 +10211,7 @@ for line in sys.stdin:
                 "WITH recent AS (SELECT * FROM events) SELECT * FROM recent WHERE EXISTS (SELECT 1 FROM audits)",
                 Some("APP")
             ),
-            "WITH recent AS (SELECT * FROM \"APP\".events) SELECT * FROM recent WHERE EXISTS (SELECT 1 FROM \"APP\".audits)"
+            "WITH recent AS (SELECT * FROM APP.events) SELECT * FROM recent WHERE EXISTS (SELECT 1 FROM APP.audits)"
         );
         assert_eq!(
             sql_for_execution_context(
@@ -10226,7 +10219,7 @@ for line in sys.stdin:
                 "INSERT INTO events SELECT * FROM staging_events",
                 Some("APP")
             ),
-            "INSERT INTO \"APP\".events SELECT * FROM \"APP\".staging_events"
+            "INSERT INTO APP.events SELECT * FROM APP.staging_events"
         );
         assert_eq!(
             sql_for_execution_context(
@@ -10234,8 +10227,32 @@ for line in sys.stdin:
                 "UPDATE events SET status = 'done' WHERE id IN (SELECT event_id FROM audit_events)",
                 Some("APP")
             ),
-            "UPDATE \"APP\".events SET status = 'done' WHERE id IN (SELECT event_id FROM \"APP\".audit_events)"
+            "UPDATE APP.events SET status = 'done' WHERE id IN (SELECT event_id FROM APP.audit_events)"
         );
+    }
+
+    #[test]
+    fn iris_execution_context_keeps_schema_unquoted_for_delimited_identifier_less_servers() {
+        // A double-quoted schema is turned into a `:%qpar` parameter by the
+        // Caché/IRIS JDBC preparser when delimited identifiers are disabled,
+        // which fails at prepare. Ordinary names must stay unquoted; only
+        // spellings that need a delimited name keep the quote characters.
+        let qualified = sql_for_execution_context_with_identifier_quote(
+            Some(DatabaseType::Iris),
+            "SELECT * FROM events",
+            Some("SQLUser"),
+            Some("\""),
+        );
+        assert_eq!(qualified, "SELECT * FROM SQLUser.events");
+        assert!(!qualified.contains('"'));
+
+        let quoted = sql_for_execution_context_with_identifier_quote(
+            Some(DatabaseType::Iris),
+            "SELECT * FROM events",
+            Some("My Schema"),
+            Some("\""),
+        );
+        assert_eq!(quoted, "SELECT * FROM \"My Schema\".events");
     }
 
     #[test]

@@ -3,6 +3,7 @@ import docs from "./docs/en";
 import { consulUiMessages } from "./consulUi";
 import { sqlServerTraceMessages as sqlServerTrace } from "./sqlServerTraceMessages";
 import { meilisearchManagementEn } from "./meilisearchManagement";
+import { mongodbDatabaseDumpEn as mongoDump } from "./mongodbDatabaseDump";
 
 const consul = {
   ...consulUiMessages,
@@ -5509,6 +5510,7 @@ export default {
       },
     },
   },
+  mongoDump,
   mongo: {
     documents: "{count} documents",
     addField: "Add Field",
@@ -7146,7 +7148,9 @@ export default {
     closeActionQuit: "Quit DBX",
     closeActionMinimize: "Minimize to tray",
     updateNotificationsEnabled: "Enable update reminders",
-    updateNotificationsEnabledDescription: "Automatically check for app and driver updates and silently download app updates. When disabled, automatic checks, app downloads and update badges stop. You can still check manually and install downloaded updates.",
+    updateNotificationsEnabledDescription: "Automatically check for app and driver updates and show reminders. When disabled, automatic checks, automatic downloads, and update badges stop. You can still check manually.",
+    autoDownloadUpdates: "Automatically download app updates",
+    autoDownloadUpdatesDescription: "When enabled with update reminders, download update packages automatically. Installation still requires confirmation. Off by default; you can download manually, and existing downloads are kept.",
     updateDownloadSource: "Update download source",
     updateDownloadSourceDescription: "Choose where app updates, database agents, drivers, and managed JREs are downloaded from. The official source is recommended; CNB can be faster on mainland China networks.",
     updateDownloadSourceOfficial: "Official source (recommended)",

@@ -3,6 +3,7 @@ import { withEnglishFallback } from "./fallback";
 import docs from "./docs/zh-CN";
 import { consul } from "./consulZhCN";
 import { meilisearchManagementZhCN } from "./meilisearchManagement";
+import { mongodbDatabaseDumpZhCN as mongoDump } from "./mongodbDatabaseDump";
 
 export default withEnglishFallback({
   cellTransform: {
@@ -5484,6 +5485,7 @@ export default withEnglishFallback({
       },
     },
   },
+  mongoDump,
   mongo: {
     documents: "{count} 个文档",
     addField: "添加字段",
@@ -7120,7 +7122,9 @@ export default withEnglishFallback({
     closeActionQuit: "退出程序",
     closeActionMinimize: "最小化到托盘",
     updateNotificationsEnabled: "启用更新提醒",
-    updateNotificationsEnabledDescription: "自动检查应用和驱动更新，并静默下载应用更新。关闭后停止自动检查、应用下载和更新红点；仍可手动检查并安装已下载的更新。",
+    updateNotificationsEnabledDescription: "自动检查应用和驱动更新并显示更新提醒。关闭后停止自动检查、自动下载和更新红点；仍可手动检查更新。",
+    autoDownloadUpdates: "自动下载应用更新",
+    autoDownloadUpdatesDescription: "启用后，在更新提醒开启时自动下载安装包，安装前仍需确认。默认关闭；关闭后可手动下载，已下载的更新会保留。",
     updateDownloadSource: "更新下载源",
     updateDownloadSourceDescription: "选择应用更新、数据库 Agent、驱动和托管 JRE 的下载来源。官方源为推荐选项，CNB 适合国内网络环境。",
     updateDownloadSourceOfficial: "官方源（推荐）",

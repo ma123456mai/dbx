@@ -666,6 +666,7 @@ const editFormatSqlOnSqlFileSave = ref(settingsStore.editorSettings.formatSqlOnS
 const editShowTableDdlHoverPreview = ref(settingsStore.editorSettings.showTableDdlHoverPreview);
 const editClickTableNavigationTarget = ref<ClickTableNavigationTarget>(settingsStore.editorSettings.clickTableNavigationTarget);
 const editUpdateNotificationsEnabled = ref(settingsStore.editorSettings.updateNotificationsEnabled);
+const editAutoDownloadUpdates = ref(settingsStore.editorSettings.autoDownloadUpdates);
 const editSidebarHiddenTablePrefixes = ref(settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n"));
 const editSidebarCopyTableNameSeparator = ref<ColumnNameCopySeparator>(settingsStore.editorSettings.sidebarCopyTableNameSeparator);
 const editSidebarCopyTableNameIncludeSchema = ref(settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema);
@@ -823,6 +824,7 @@ function currentEditorSettingsDraft(): EditorSettingsDraft {
     formatSqlOnSqlFileSave: editFormatSqlOnSqlFileSave.value,
     showTableDdlHoverPreview: editShowTableDdlHoverPreview.value,
     updateNotificationsEnabled: editUpdateNotificationsEnabled.value,
+    autoDownloadUpdates: editAutoDownloadUpdates.value,
     sidebarObjectInfoMode: editSidebarObjectInfoMode.value,
     sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll.value,
     sidebarShowTooltips: editSidebarShowTooltips.value,
@@ -1348,6 +1350,7 @@ function syncEditorSettingsDraftFromStore() {
   editShowTableDdlHoverPreview.value = settingsStore.editorSettings.showTableDdlHoverPreview;
   editClickTableNavigationTarget.value = settingsStore.editorSettings.clickTableNavigationTarget;
   editUpdateNotificationsEnabled.value = settingsStore.editorSettings.updateNotificationsEnabled;
+  editAutoDownloadUpdates.value = settingsStore.editorSettings.autoDownloadUpdates;
   editSidebarHiddenTablePrefixes.value = settingsStore.editorSettings.sidebarHiddenTablePrefixes.join("\n");
   editSidebarCopyTableNameSeparator.value = settingsStore.editorSettings.sidebarCopyTableNameSeparator;
   editSidebarCopyTableNameIncludeSchema.value = settingsStore.editorSettings.sidebarCopyTableNameIncludeSchema;
@@ -1463,6 +1466,7 @@ const editorSettingsDraftRefs: EditorSettingsDraftRefMap = {
   formatSqlOnSqlFileSave: editFormatSqlOnSqlFileSave,
   showTableDdlHoverPreview: editShowTableDdlHoverPreview,
   updateNotificationsEnabled: editUpdateNotificationsEnabled,
+  autoDownloadUpdates: editAutoDownloadUpdates,
   sidebarObjectInfoMode: editSidebarObjectInfoMode,
   sidebarAllowHorizontalScroll: editSidebarAllowHorizontalScroll,
   sidebarShowTooltips: editSidebarShowTooltips,
@@ -1942,6 +1946,7 @@ function resetDefaultsForTab(tab: SettingsCategory) {
   } else if (tab === "about") {
     editUpdateDownloadSource.value = DEFAULT_EDITOR_SETTINGS.updateDownloadSource;
     editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
+    editAutoDownloadUpdates.value = DEFAULT_EDITOR_SETTINGS.autoDownloadUpdates;
   }
 }
 
@@ -2037,6 +2042,7 @@ function resetAllDefaults() {
   editFormatSqlOnSqlFileSave.value = DEFAULT_EDITOR_SETTINGS.formatSqlOnSqlFileSave;
   editShowTableDdlHoverPreview.value = DEFAULT_EDITOR_SETTINGS.showTableDdlHoverPreview;
   editUpdateNotificationsEnabled.value = DEFAULT_EDITOR_SETTINGS.updateNotificationsEnabled;
+  editAutoDownloadUpdates.value = DEFAULT_EDITOR_SETTINGS.autoDownloadUpdates;
   editSidebarObjectInfoMode.value = DEFAULT_EDITOR_SETTINGS.sidebarObjectInfoMode;
   editSidebarAllowHorizontalScroll.value = DEFAULT_EDITOR_SETTINGS.sidebarAllowHorizontalScroll;
   editSidebarShowTooltips.value = DEFAULT_EDITOR_SETTINGS.sidebarShowTooltips;
@@ -4750,6 +4756,8 @@ function aiSelectProvider(presetId: string) {
   if (isWeb && (CLI_AI_PROVIDERS.has(provider) || presetId === CC_SWITCH_PROVIDER_ID)) return;
   if (presetId === aiEditProviderPresetId.value) return;
 
+  syncAiEditState();
+
   // CC-SWITCH is a UI-only preset; installation is initiated by its action buttons.
   aiEditProviderPresetId.value = presetId;
   aiEditProvider.value = provider;
@@ -4779,6 +4787,7 @@ function aiEnterListMode() {
 }
 
 function aiEnterEditMode(configId?: string) {
+  syncAiEditState();
   aiConfigListMode.value = "edit";
   aiEditConfigId.value = configId || null;
 
@@ -9825,6 +9834,15 @@ LIMIT 100;</pre
                     </p>
                   </div>
                   <Switch id="update-notifications-enabled" v-model="editUpdateNotificationsEnabled" />
+                </div>
+                <div class="flex items-center justify-between gap-4">
+                  <div class="min-w-0 space-y-1">
+                    <Label for="auto-download-updates">{{ t("settings.autoDownloadUpdates") }}</Label>
+                    <p class="text-sm text-muted-foreground">
+                      {{ t("settings.autoDownloadUpdatesDescription") }}
+                    </p>
+                  </div>
+                  <Switch id="auto-download-updates" v-model="editAutoDownloadUpdates" />
                 </div>
                 <div class="flex flex-col gap-3 border-t border-border/60 pt-4 sm:flex-row sm:items-center sm:justify-between">
                   <div class="min-w-0 space-y-1">

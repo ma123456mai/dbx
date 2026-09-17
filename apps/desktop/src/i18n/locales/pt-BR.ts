@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { mongodbDatabaseDumpPtBR as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementPtBR } from "./meilisearchManagement";
 import { redisGroupingPtBR as redisGrouping } from "./redisGrouping";
 import docs from "./docs/pt-BR";
@@ -83,6 +84,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoDump,
   cellTransform: {
     title: "Prévia da conversão",
     description: "Converte o valor atual para visualizar ou copiar. O valor original e o rascunho permanecem inalterados.",
@@ -6685,7 +6687,9 @@ export default withEnglishFallback({
     closeActionQuit: "Sair do DBX",
     closeActionMinimize: "Minimizar para a bandeja",
     updateNotificationsEnabled: "Ativar lembretes de atualização",
-    updateNotificationsEnabledDescription: "Verifica atualizações do app e dos drivers e baixa as do app silenciosamente. Ao desativar, as verificações, downloads e indicadores param. Você ainda pode verificar manualmente e instalar atualizações baixadas.",
+    updateNotificationsEnabledDescription: "Verifica automaticamente atualizações do app e dos drivers e mostra lembretes. Ao desativar, as verificações e os downloads automáticos e os indicadores param. Você ainda pode verificar manualmente.",
+    autoDownloadUpdates: "Baixar atualizações do app automaticamente",
+    autoDownloadUpdatesDescription: "Com os lembretes ativados, baixa os pacotes automaticamente. A instalação exige confirmação. Desativado por padrão; você pode baixar manualmente e os downloads existentes são mantidos.",
     updateDownloadSource: "Fonte de download de atualização",
     updateDownloadSourceDescription: "Escolha de onde os instaladores de atualização no aplicativo são baixados. A fonte oficial é recomendada; CNB pode ser mais rápido em redes da China continental.",
     updateDownloadSourceOfficial: "Fonte oficial (recomendada)",

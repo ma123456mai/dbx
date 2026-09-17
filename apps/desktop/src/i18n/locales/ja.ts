@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { mongodbDatabaseDumpJa as mongoDump } from "./mongodbDatabaseDump";
 import docs from "./docs/ja";
 import { consulJaMessages } from "./consulJa";
 import { nacosAccessControlMessages, nacosAccessControlTabs } from "./nacosAccessControl";
@@ -83,6 +84,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoDump,
   cellTransform: {
     title: "変換プレビュー",
     description: "現在の値を変換して表示またはコピーします。元の値と編集中の内容は変更されません。",
@@ -6721,7 +6723,9 @@ export default withEnglishFallback({
     closeActionQuit: "DBXを終了",
     closeActionMinimize: "トレイに最小化",
     updateNotificationsEnabled: "アップデート通知を有効にする",
-    updateNotificationsEnabledDescription: "アプリとドライバーの更新を自動確認し、アプリ更新を通知せずにダウンロードします。無効にすると自動確認、ダウンロード、更新バッジが停止します。手動確認とダウンロード済み更新のインストールは可能です。",
+    updateNotificationsEnabledDescription: "アプリとドライバーの更新を自動確認し、通知を表示します。無効にすると自動確認、自動ダウンロード、更新バッジが停止します。手動確認は可能です。",
+    autoDownloadUpdates: "アプリの更新を自動ダウンロード",
+    autoDownloadUpdatesDescription: "更新通知が有効な場合、更新パッケージを自動ダウンロードします。インストールには確認が必要です。初期設定はオフです。手動ダウンロードは可能で、ダウンロード済みの更新は保持されます。",
     debugLoggingEnabled: "デバッグログを有効にする",
     debugLoggingEnabledDescription: "トラブルシューティング時に、より詳細なローカル診断ログを記録します。デフォルトでは無効です。",
     metadataCacheMemoryLimit: "メタデータメモリキャッシュ上限",

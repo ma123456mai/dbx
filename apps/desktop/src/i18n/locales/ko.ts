@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { mongodbDatabaseDumpKo as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementKo } from "./meilisearchManagement";
 import { redisGroupingKo as redisGrouping } from "./redisGrouping";
 import docs from "./docs/ko";
@@ -82,6 +83,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoDump,
   cellTransform: {
     title: "변환 미리보기",
     description: "현재 값을 변환하여 보거나 복사합니다. 원래 값과 편집 초안은 변경되지 않습니다.",
@@ -6435,7 +6437,9 @@ export default withEnglishFallback({
     closeActionQuit: "DBX 종료",
     closeActionMinimize: "트레이로 최소화",
     updateNotificationsEnabled: "업데이트 알림 활성화",
-    updateNotificationsEnabledDescription: "앱과 드라이버 업데이트를 자동 확인하고 앱 업데이트를 조용히 다운로드합니다. 끄면 자동 확인, 앱 다운로드와 배지가 중지됩니다. 수동 확인 및 다운로드된 업데이트 설치는 가능합니다.",
+    updateNotificationsEnabledDescription: "앱과 드라이버 업데이트를 자동 확인하고 알림을 표시합니다. 끄면 자동 확인, 자동 다운로드 및 업데이트 배지가 중지됩니다. 수동 확인은 가능합니다.",
+    autoDownloadUpdates: "앱 업데이트 자동 다운로드",
+    autoDownloadUpdatesDescription: "업데이트 알림이 켜져 있으면 업데이트 패키지를 자동으로 다운로드합니다. 설치 전에는 확인이 필요합니다. 기본값은 꺼짐입니다. 수동 다운로드가 가능하며 기존 다운로드는 유지됩니다.",
     updateDownloadSource: "업데이트 다운로드 소스",
     updateDownloadSourceDescription: "앱 업데이트, 데이터베이스 에이전트, 드라이버, 관리 JRE를 다운로드할 위치를 선택하세요. 공식 소스를 권장합니다. 중국 본토 네트워크에서는 CNB가 더 빠를 수 있습니다.",
     updateDownloadSourceOfficial: "공식 소스 (권장)",

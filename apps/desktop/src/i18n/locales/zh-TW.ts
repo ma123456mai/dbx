@@ -1,5 +1,6 @@
 import { redisGroupingZhTW as redisGrouping } from "./redisGrouping";
 import { withEnglishFallback } from "./fallback";
+import { mongodbDatabaseDumpZhTW as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementZhTW } from "./meilisearchManagement";
 import docs from "./docs/zh-TW";
 import { consulZhTWMessages } from "./consulZhTW";
@@ -82,6 +83,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoDump,
   cellTransform: {
     title: "轉換預覽",
     description: "將目前內容轉換後檢視或複製，不改變原值和編輯草稿。",
@@ -6002,7 +6004,9 @@ export default withEnglishFallback({
     closeActionQuit: "退出程式",
     closeActionMinimize: "最小化到系統匣",
     updateNotificationsEnabled: "啟用更新提醒",
-    updateNotificationsEnabledDescription: "自動檢查應用程式和驅動程式更新，並靜默下載應用程式更新。關閉後停止自動檢查、應用程式下載和更新紅點；仍可手動檢查並安裝已下載的更新。",
+    updateNotificationsEnabledDescription: "自動檢查應用程式和驅動程式更新並顯示提醒。關閉後停止自動檢查、自動下載和更新紅點；仍可手動檢查更新。",
+    autoDownloadUpdates: "自動下載應用程式更新",
+    autoDownloadUpdatesDescription: "啟用後，在更新提醒開啟時自動下載安裝套件，安裝前仍需確認。預設關閉；關閉後可手動下載，已下載的更新會保留。",
     debugLoggingEnabled: "啟用偵錯日誌",
     debugLoggingEnabledDescription: "開啟後在本機記錄更詳細的使用者側診斷日誌，回報問題時可暫時開啟；預設關閉。",
     metadataCacheMemoryLimit: "中繼資料記憶體快取上限",

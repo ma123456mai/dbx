@@ -1,4 +1,5 @@
 import { withEnglishFallback } from "./fallback";
+import { mongodbDatabaseDumpEs as mongoDump } from "./mongodbDatabaseDump";
 import { meilisearchManagementEs } from "./meilisearchManagement";
 import { redisGroupingEs as redisGrouping } from "./redisGrouping";
 import docs from "./docs/es";
@@ -83,6 +84,7 @@ const consul = {
 };
 
 export default withEnglishFallback({
+  mongoDump,
   cellTransform: {
     title: "Vista previa de conversión",
     description: "Convierte el valor actual para verlo o copiarlo. El valor original y el borrador no cambian.",
@@ -6683,7 +6685,9 @@ export default withEnglishFallback({
     closeActionQuit: "Salir de DBX",
     closeActionMinimize: "Minimizar a la bandeja",
     updateNotificationsEnabled: "Activar recordatorios de actualización",
-    updateNotificationsEnabledDescription: "Comprueba actualizaciones de la app y los controladores y descarga las de la app en silencio. Al desactivar se detienen las comprobaciones, descargas e indicadores. Puedes comprobar manualmente e instalar actualizaciones descargadas.",
+    updateNotificationsEnabledDescription: "Comprueba automáticamente las actualizaciones de la app y los controladores y muestra recordatorios. Al desactivar, se detienen las comprobaciones y descargas automáticas y los indicadores. Puedes comprobar manualmente.",
+    autoDownloadUpdates: "Descargar actualizaciones de la app automáticamente",
+    autoDownloadUpdatesDescription: "Con los recordatorios activados, descarga los paquetes automáticamente. La instalación requiere confirmación. Desactivado por defecto; puedes descargar manualmente y se conservan las descargas existentes.",
     updateDownloadSource: "Origen de descarga de actualizaciones",
     updateDownloadSourceDescription: "Elige de dónde se descargan los instaladores de actualización. Se recomienda la fuente oficial; CNB puede ser más rápido en redes de China continental.",
     updateDownloadSourceOfficial: "Fuente oficial (recomendada)",
