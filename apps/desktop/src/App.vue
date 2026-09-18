@@ -4255,6 +4255,7 @@ onUnmounted(() => {
                   "
                   @open-mcp-settings="openSettings('mcp')"
                   @ai-config-deep-link-handled="settingsAiConfigDraft = null"
+                  @open-plugin-center="openPluginCenterPage({ pluginId: 'cc-switch' })"
                 />
               </AppTabBar>
               <DetachedTabHeader
