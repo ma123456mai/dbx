@@ -21,6 +21,6 @@ describe("EditorSettingsDialog CC-SWITCH provider", () => {
 
   it("offers the plugin center when the capability is unavailable", () => {
     expect(dialogSource).toContain("!aiCcSwitchPluginAvailable");
-    expect(dialogSource).toContain(`@click="emit('open-plugin-center')"`);
+    expect(dialogSource).toContain(`@click="emit('open-cc-switch-plugin-center')"`);
   });
 });

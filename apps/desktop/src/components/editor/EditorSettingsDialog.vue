@@ -452,6 +452,7 @@ const emit = defineEmits<{
   "update-all": [];
   "open-driver-store": [target?: DriverStoreTab];
   "open-plugin-center": [];
+  "open-cc-switch-plugin-center": [];
   "open-mcp-settings": [];
   "open-update-center": [];
   "ai-config-deep-link-handled": [];
@@ -9185,7 +9186,7 @@ LIMIT 100;</pre
                     <p class="text-xs leading-relaxed text-muted-foreground">{{ t("ai.ccSwitchPluginNotInstalledStatus") }}</p>
                   </div>
                 </div>
-                <Button type="button" size="sm" variant="outline" class="shrink-0" @click="emit('open-plugin-center')">
+                <Button type="button" size="sm" variant="outline" class="shrink-0" @click="emit('open-cc-switch-plugin-center')">
                   <PackageSearch class="mr-1 h-3.5 w-3.5" />
                   {{ t("toolbar.pluginCenter") }}
                 </Button>
