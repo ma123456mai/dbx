@@ -500,7 +500,6 @@ const emit = defineEmits<{
   "open-mcp-settings": [];
   "open-update-center": [];
   "ai-config-deep-link-handled": [];
-  "open-plugin-center": [];
 }>();
 
 const hasAnyUpdate = computed(() => Boolean(props.appUpdateAvailable || (props.driverUpdateCount || 0) > 0 || props.jdbcUpdateAvailable || props.mcpUpdateAvailable || (props.pluginUpdateCount || 0) > 0));
