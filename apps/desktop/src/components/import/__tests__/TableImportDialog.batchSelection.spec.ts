@@ -262,6 +262,8 @@ describe("TableImportDialog batch selection", () => {
 
     expect(document.body.querySelector('button[aria-label="Restore import"]')).toBeTruthy();
     expect(document.body.querySelector('button[aria-label="Next"]')).toBeNull();
+    expect(document.body.textContent).toContain("Ready to import");
+    expect(document.body.textContent).not.toContain("Writing data");
 
     document.body.querySelector<HTMLButtonElement>('button[aria-label="Restore import"]')!.click();
     await flushAsyncUpdates();

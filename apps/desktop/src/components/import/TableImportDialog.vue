@@ -254,6 +254,7 @@ const terminalStatus = computed(() => !!progress.value?.status && ["done", "erro
 const displayedElapsedMs = computed(() => resolveTableImportElapsed(liveElapsedMs.value, progress.value?.elapsedMs, terminalStatus.value));
 const progressLabelKey = computed(() => {
   if (terminalStatus.value) return `tableImport.status_${progress.value?.status || "idle"}`;
+  if (!running.value && !progress.value) return "tableImport.status_idle";
   return `tableImport.phase_${progress.value?.phase || "writing"}`;
 });
 
