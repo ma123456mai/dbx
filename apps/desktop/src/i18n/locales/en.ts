@@ -6780,6 +6780,9 @@ export default {
   },
   tableImport: {
     title: "Import Table Data",
+    minimize: "Minimize import",
+    restoreImport: "Restore import",
+    backgroundWarning: "Rows may appear as they are written. Concurrent access to the target table may wait or fail because of database locks, transaction isolation, or constraints.",
     selectedTasks: "{selected} / {total} import items selected",
     selectTask: "Import {name}",
     noTasksSelected: "Select at least one item to import.",
