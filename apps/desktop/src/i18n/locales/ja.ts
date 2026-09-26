@@ -6180,6 +6180,9 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "テーブルデータをインポート",
+    minimize: "インポートを最小化",
+    restoreImport: "インポートを復元",
+    backgroundWarning: "書き込み中の行は順次表示される場合があります。対象テーブルへの同時アクセスは、データベースロック、トランザクション分離、制約により待機または失敗することがあります。",
     target: "対象テーブル",
     selectFile: "ファイルを選択",
     changeFile: "Change File",

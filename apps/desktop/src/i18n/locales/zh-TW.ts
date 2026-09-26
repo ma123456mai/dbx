@@ -5469,6 +5469,9 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "匯入資料表資料",
+    minimize: "最小化匯入視窗",
+    restoreImport: "還原匯入視窗",
+    backgroundWarning: "資料列可能會隨寫入逐步顯示。並行存取目標資料表時，可能因資料庫鎖定、交易隔離或限制條件而等待或失敗。",
     target: "目標資料表",
     selectFile: "選擇檔案",
     changeFile: "更換檔案",

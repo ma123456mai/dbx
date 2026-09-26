@@ -6153,6 +6153,9 @@ export default withEnglishFallback({
   },
   tableImport: {
     title: "Importa Dati Tabella",
+    minimize: "Riduci a icona l'importazione",
+    restoreImport: "Ripristina importazione",
+    backgroundWarning: "Le righe possono comparire man mano che vengono scritte. L'accesso simultaneo alla tabella di destinazione può attendere o non riuscire a causa di blocchi del database, dell'isolamento delle transazioni o dei vincoli.",
     target: "Tabella di destinazione",
     selectFile: "Seleziona File",
     changeFile: "Change File",
