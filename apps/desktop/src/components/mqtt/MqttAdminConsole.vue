@@ -618,7 +618,7 @@ onUnmounted(stopPolling);
               </Button>
             </div>
           </div>
-<CustomContextMenu :items="messageContextMenuItems" v-slot="{ onContextMenu }">
+          <CustomContextMenu :items="messageContextMenuItems" v-slot="{ onContextMenu }">
             <div ref="messageListRef" data-testid="mqtt-message-list" class="flex min-h-0 flex-1 flex-col gap-4 overflow-auto p-3">
               <div v-if="messages.length === 0" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMessages") }}</div>
               <div v-else-if="filteredMessages.length === 0" data-testid="mqtt-no-matching-messages" class="p-4 text-center text-xs text-muted-foreground">{{ t("connection.mqttNoMatchingMessages") }}</div>
@@ -662,7 +662,8 @@ onUnmounted(stopPolling);
                   <template v-if="!isMessagePayloadCollapsed(msg.previewKey)">{{ formatMessagePayload(msg) }}</template>
                 </div>
                 <time class="mt-1 block text-[10px] tabular-nums text-muted-foreground/70">{{ formatMessageTimestamp(msg.receivedAtMs) }}</time>
-              </div>            </div>
+              </div>
+            </div>
           </CustomContextMenu>
         </div>
         <MqttPublishPanel v-if="connected" v-show="!publishPanelCollapsed" :connection-id="connectionId" :initial-topic="selectedTopic" @published="handleMessagePublished" />
