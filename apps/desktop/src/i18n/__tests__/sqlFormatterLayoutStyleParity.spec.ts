@@ -41,7 +41,7 @@ describe("SQL formatter layout style i18n parity", () => {
     const source = localeSource("en");
 
     expect(declaredString(source, "sqlFormatterLayoutStyle")).toBe("Layout style");
-    expect(declaredString(source, "sqlFormatterLayoutStyleDbx")).toBe("DBX (default)");
+    expect(declaredString(source, "sqlFormatterLayoutStyleDbx")).toBe("DBX");
     expect(declaredString(source, "sqlFormatterLayoutStyleClassic")).toBe("Classic");
   });
 

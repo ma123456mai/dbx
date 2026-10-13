@@ -537,7 +537,7 @@ describe("settingsTransfer", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.editorSettings.sqlFormatter?.layoutStyle).toBe("dbx");
+    expect(result.value.editorSettings.sqlFormatter?.layoutStyle).toBe("classic");
     expect(result.value.editorSettings.sqlFormatter?.commaPosition).toBe("after");
   });
 
