@@ -158,11 +158,11 @@ test("rejects malformed formatter config files", () => {
   assert.deepEqual(parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { unknown: true } })).ok, false);
 });
 
-test("accepts config versions 1 and 2 and defaults a missing layoutStyle to classic", () => {
+test("accepts config versions 1 and 2 and defaults a missing layoutStyle to dbx", () => {
   const version1 = parseSqlFormatterConfig(JSON.stringify({ version: 1, formatter: "sql-formatter", options: { keywordCase: "lower" } }));
   assert.equal(version1.ok, true);
   if (version1.ok) {
-    assert.equal(version1.settings.layoutStyle, "classic");
+    assert.equal(version1.settings.layoutStyle, "dbx");
     assert.equal(version1.settings.keywordCase, "lower");
   }
 
@@ -174,7 +174,7 @@ test("accepts config versions 1 and 2 and defaults a missing layoutStyle to clas
   assert.equal(invalidStyle.ok, false);
   if (!invalidStyle.ok) assert.match(invalidStyle.message, /layoutStyle/);
 
-  assert.equal(normalizeSqlFormatterSettings({}).layoutStyle, "classic");
+  assert.equal(normalizeSqlFormatterSettings({}).layoutStyle, "dbx");
   // layoutStyle is DBX-private and must never reach sql-formatter.
   assert.equal("layoutStyle" in sqlFormatterOptions({ layoutStyle: "classic" }), false);
 });

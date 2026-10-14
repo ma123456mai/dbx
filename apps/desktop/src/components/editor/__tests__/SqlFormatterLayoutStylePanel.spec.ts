@@ -83,21 +83,21 @@ describe("SQL formatter layout style panel", () => {
     host = null;
   });
 
-  it("renders Classic first and changes only the layout style", async () => {
+  it("selects the DBX layout by default and preserves other formatter settings", async () => {
     const update = vi.fn();
     const root = mountPanel(DEFAULT_SQL_FORMATTER_SETTINGS, update);
 
-    const styleSelect = root.querySelector('[data-model-value="classic"]');
+    const styleSelect = root.querySelector('[data-model-value="dbx"]');
     expect(styleSelect).not.toBeNull();
     const layoutOptions = Array.from(styleSelect!.querySelectorAll('[data-stub="SelectItem"]')).map((node) => node.getAttribute("value"));
     expect(layoutOptions).toEqual(["classic", "dbx"]);
 
-    styleSelect!.dispatchEvent(new CustomEvent("pick", { detail: { value: "dbx" } }));
+    styleSelect!.dispatchEvent(new CustomEvent("pick", { detail: { value: "classic" } }));
     await nextTick();
-    expect(update).toHaveBeenLastCalledWith({ ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "dbx" });
+    expect(update).toHaveBeenLastCalledWith({ ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "classic" });
   });
 
-  it("restores the expanded classic formatter defaults", async () => {
+  it("restores the current formatter defaults", async () => {
     const update = vi.fn();
     const root = mountPanel({ ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "dbx", expressionWidth: 50 }, update);
 

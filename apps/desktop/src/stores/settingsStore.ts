@@ -5,7 +5,7 @@ import { defineStore } from "pinia";
 import { computed, ref } from "vue";
 import { aiConfigToItem, generateId, getConfigKey } from "@/lib/ai/aiConfigList";
 import { AI_CONVERSATION_FONT_FAMILY_DEFAULT, AI_CONVERSATION_FONT_SIZE_DEFAULT, normalizeAiConversationFontFamily, normalizeAiConversationFontSize } from "@/lib/ai/aiTypography";
-import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY } from "@/lib/app/appFonts";
+import { DEFAULT_DATA_GRID_FONT_FAMILY, DEFAULT_MONO_FONT_FAMILY, DEFAULT_UI_FONT_FAMILY, LEGACY_PRESET_FONT_MAP } from "@/lib/app/appFonts";
 import { emitAlwaysOnTopToolbarVisibilityChanged } from "@/lib/app/windowAlwaysOnTop";
 import { defaultBackgroundImageSettings, normalizeBackgroundImageSettings, type BackgroundImageSettings } from "@/lib/app/appBackgroundImage";
 import * as api from "@/lib/backend/api";
@@ -1001,6 +1001,7 @@ export interface EditorSettings {
   savedSqlOpenTargetMode: SavedSqlOpenTargetMode;
   welcomePageMode: WelcomePageMode;
   welcomePageModeDefaultVersion: number;
+  sqlFormatterLayoutStyleDefaultVersion: number;
   compactTabTitle: boolean;
   tabLayout: TabLayoutMode;
   tabPlacement: TabPlacement;
@@ -1308,6 +1309,8 @@ export const SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION = 1;
 // v1: the welcome page default moved from "intro" back to "workspace"; persisted
 // blobs from the intro-default builds lack this marker and are migrated.
 export const WELCOME_PAGE_DEFAULT_VERSION = 1;
+// v1: SQL formatting now uses DBX layout by default; prior saved "classic" defaults migrate.
+export const SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION = 1;
 
 export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   fontFamily: DEFAULT_MONO_FONT_FAMILY,
@@ -1363,6 +1366,7 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   savedSqlOpenTargetMode: "saved",
   welcomePageMode: "workspace",
   welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
+  sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
   compactTabTitle: false,
   tabLayout: "scroll",
   tabPlacement: "top",
@@ -1554,13 +1558,11 @@ function normalizeUiScale(value: unknown): number {
   return Math.min(MAX_UI_SCALE, Math.max(MIN_UI_SCALE, Math.round(value * 100) / 100));
 }
 
-const LEGACY_DEFAULT_MONO_FONT_FAMILY = "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace";
-
-function normalizeFontFamily(value: unknown, fallback: string): string {
+function normalizeFontFamily(value: unknown, fallback: string, migrateMonoPresets = false): string {
   if (typeof value !== "string") return fallback;
   const trimmed = value.trim();
-  if (!trimmed || trimmed === LEGACY_DEFAULT_MONO_FONT_FAMILY) return fallback;
-  return trimmed;
+  if (!trimmed) return fallback;
+  return (migrateMonoPresets ? LEGACY_PRESET_FONT_MAP[trimmed] : undefined) ?? trimmed;
 }
 
 function normalizeDrawerWidth(value: unknown, min: number, fallback: number): number {
@@ -1899,6 +1901,8 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const savedWelcomePageDefaultVersion = settings.welcomePageModeDefaultVersion;
   const welcomePageModeDefaultVersion = typeof savedWelcomePageDefaultVersion === "number" && savedWelcomePageDefaultVersion >= WELCOME_PAGE_DEFAULT_VERSION ? savedWelcomePageDefaultVersion : WELCOME_PAGE_DEFAULT_VERSION;
   const hasCurrentWelcomePageDefault = welcomePageModeDefaultVersion === savedWelcomePageDefaultVersion;
+  const savedSqlFormatterLayoutStyleDefaultVersion = settings.sqlFormatterLayoutStyleDefaultVersion;
+  const sqlFormatterLayoutStyleDefaultVersion = typeof savedSqlFormatterLayoutStyleDefaultVersion === "number" && savedSqlFormatterLayoutStyleDefaultVersion >= SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION ? savedSqlFormatterLayoutStyleDefaultVersion : SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION;
   // The active id can only be validated once the scheme list it points into is known.
   const dataGridTypeColorSchemes = normalizeDataGridTypeColorSchemes(settings.dataGridTypeColorSchemes);
   const savedExtractorMigrationVersion = settings.dataGridExtractorOptionsMigrationVersion;
@@ -1954,7 +1958,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   })();
   const activeCustomThemeId = settings.activeCustomThemeId && customThemes.some((t) => t.id === settings.activeCustomThemeId) ? settings.activeCustomThemeId : (customThemes[0]?.id ?? "default");
   return {
-    fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily),
+    fontFamily: normalizeFontFamily(settings.fontFamily, DEFAULT_EDITOR_SETTINGS.fontFamily, true),
     fontSize: settings.fontSize ?? DEFAULT_EDITOR_SETTINGS.fontSize,
     uiFontFamily: normalizeFontFamily(settings.uiFontFamily, DEFAULT_EDITOR_SETTINGS.uiFontFamily),
     aiFontFamily: normalizeAiConversationFontFamily(settings.aiFontFamily),
@@ -2014,6 +2018,7 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     savedSqlOpenTargetMode: settings.savedSqlOpenTargetMode === "current" ? "current" : DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode,
     welcomePageMode: hasCurrentWelcomePageDefault && (settings.welcomePageMode === "intro" || settings.welcomePageMode === "workspace") ? settings.welcomePageMode : DEFAULT_EDITOR_SETTINGS.welcomePageMode,
     welcomePageModeDefaultVersion,
+    sqlFormatterLayoutStyleDefaultVersion,
     compactTabTitle: settings.compactTabTitle ?? DEFAULT_EDITOR_SETTINGS.compactTabTitle,
     tabLayout: normalizeTabLayout(settings.tabLayout),
     tabPlacement: normalizeTabPlacement(settings.tabPlacement),
@@ -2441,6 +2446,12 @@ export const useSettingsStore = defineStore("settings", () => {
           };
           const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
           const needsWelcomePageDefaultMigration = typeof savedSettings.welcomePageModeDefaultVersion !== "number" || savedSettings.welcomePageModeDefaultVersion < WELCOME_PAGE_DEFAULT_VERSION;
+          const needsSqlFormatterLayoutStyleDefaultMigration = typeof savedSettings.sqlFormatterLayoutStyleDefaultVersion !== "number" || savedSettings.sqlFormatterLayoutStyleDefaultVersion < SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION;
+          if (needsSqlFormatterLayoutStyleDefaultMigration) {
+            // Before this marker, "classic" was also the default; switch old records to DBX layout once.
+            normalized.sqlFormatter = { ...normalized.sqlFormatter, layoutStyle: "dbx" };
+            normalized.sqlFormatterLayoutStyleDefaultVersion = SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION;
+          }
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
           // v2 also resets a historically persisted includeDatabaseName=true, so
@@ -2450,7 +2461,7 @@ export const useSettingsStore = defineStore("settings", () => {
           const needsDataGridExtractorOptionsMigration =
             (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && (savedNullText === "NULL" || savedSqlIncludeDatabaseName === true);
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
-          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
+          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsSqlFormatterLayoutStyleDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
             await enqueueEditorSettingsSave().catch(() => {});
           }

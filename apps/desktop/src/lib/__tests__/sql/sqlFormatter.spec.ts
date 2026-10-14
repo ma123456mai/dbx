@@ -800,30 +800,26 @@ describe("classic layout style (v0.6.15 reproduction)", () => {
     await expect(formatSqlText(sql, "oracle", { ...classic, functionCase: "upper" })).resolves.toBe(lines("SELECT", "  SUBSTRB(NAME, 1, 3),", "  INSTR2(NAME, 'x'),", "  LENGTHB(NAME)", "FROM", "  t;"));
   });
 
-  it("uses the expanded classic layout by default and keeps the compact DBX layout selectable", async () => {
+  it("uses the DBX layout by default and keeps classic selectable", async () => {
     const sql = "select * from task order by created_at desc;";
     const collapsed = "SELECT * FROM task ORDER BY created_at DESC;";
 
-    // The default expands clauses like a conventional IDE formatter; opting
-    // into DBX keeps the previous compact output.
-    expect(await formatSqlTextWithBuildDefaults(sql, "mysql", { layoutStyle: "dbx" })).toBe(collapsed);
-    expect(await formatSqlTextWithBuildDefaults(sql, "mysql")).toBe("SELECT\n  *\nFROM task\nORDER BY\n  created_at DESC;");
-    // A settings object saved before `layoutStyle` existed follows the new default.
-    expect(await formatSqlTextWithBuildDefaults(sql, "mysql", {} as Partial<SqlFormatterSettings>)).toBe("SELECT\n  *\nFROM task\nORDER BY\n  created_at DESC;");
+    expect(await formatSqlTextWithBuildDefaults(sql, "mysql")).toBe(collapsed);
+    expect(await formatSqlTextWithBuildDefaults(sql, "mysql", {} as Partial<SqlFormatterSettings>)).toBe(collapsed);
+    expect(await formatSqlTextWithBuildDefaults(sql, "mysql", { layoutStyle: "classic" })).toBe("SELECT\n  *\nFROM task\nORDER BY\n  created_at DESC;");
   });
 
   it("formats multiple statements on separate blocks by default", async () => {
     const sql = "select id, name from users; select count(*) from orders;";
 
-    await expect(formatSqlTextWithBuildDefaults(sql, "mysql")).resolves.toBe("SELECT\n  id,\n  name\nFROM users;\n\nSELECT\n  count(*)\nFROM orders;");
+    await expect(formatSqlTextWithBuildDefaults(sql, "mysql")).resolves.toBe("SELECT id,\n       name\nFROM users;\n\nSELECT count(*) FROM orders;");
   });
 
   it("merges a classic FROM clause onto its source with a single space under the standard indent", async () => {
     // `sameLine` (the default) merges the clause line with the source line, and
     // the merge must not reuse the source's indent as the gap: that is the
     // tabular styles' alignment column, but under the standard indent it would
-    // read `FROM  t`. Selecting classic is now the only path to this merge, so
-    // the classic style is what pins its appearance.
+    // read `FROM  t`. This explicitly exercises sql-formatter's upstream layout.
     expect(await formatSqlText("select * from t", "mysql", classic)).toBe(lines("SELECT", "  *", "FROM", "  t"));
     expect(await formatSqlText("select * from t", "mysql", { ...classic, fromClauseLayout: "sameLine" })).toBe(lines("SELECT", "  *", "FROM t"));
   });

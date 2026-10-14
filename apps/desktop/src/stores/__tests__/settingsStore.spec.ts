@@ -12,6 +12,7 @@ import {
   type CustomThemeColors,
   EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
+  SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
   enforceRightSidebarPanelExclusivity,
   getAiProviderPreset,
   getAiProviderPresetDefaultEndpoint,
@@ -68,6 +69,17 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ welcomePageMode: "intro" }).welcomePageMode).toBe("workspace");
     expect(normalizeEditorSettings({ welcomePageMode: "intro", welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION }).welcomePageMode).toBe("intro");
     expect(normalizeEditorSettings({ welcomePageMode: "workspace", welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION }).welcomePageMode).toBe("workspace");
+  });
+
+  it("preserves an explicitly selected formatter layout after the DBX-default migration", () => {
+    expect(DEFAULT_EDITOR_SETTINGS.sqlFormatter.layoutStyle).toBe("dbx");
+    expect(DEFAULT_EDITOR_SETTINGS.sqlFormatterLayoutStyleDefaultVersion).toBe(SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION);
+    expect(
+      normalizeEditorSettings({
+        sqlFormatter: { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, layoutStyle: "classic" },
+        sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
+      }).sqlFormatter.layoutStyle,
+    ).toBe("classic");
   });
 
   it("defaults and sanitizes AI conversation typography independently", () => {
@@ -764,6 +776,11 @@ describe("normalizeEditorSettings", () => {
     expect(
       normalizeEditorSettings({
         fontFamily: "'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', monospace",
+      }).fontFamily,
+    ).toBe(DEFAULT_MONO_FONT_FAMILY);
+    expect(
+      normalizeEditorSettings({
+        fontFamily: `'Fira Code', 'Cascadia Code', 'Cascadia Mono', 'JetBrains Mono', "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", monospace`,
       }).fontFamily,
     ).toBe(DEFAULT_MONO_FONT_FAMILY);
     expect(normalizeEditorSettings({ fontFamily: "'Custom Mono', monospace" }).fontFamily).toBe("'Custom Mono', monospace");
@@ -2002,6 +2019,32 @@ describe("settingsStore editor settings persistence", () => {
     setActivePinia(createPinia());
   });
 
+  it("migrates the old Classic SQL formatter default to DBX layout", async () => {
+    const loadEditorSettings = vi.fn().mockResolvedValue({
+      sqlFormatter: { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, layoutStyle: "classic" },
+      executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
+      welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
+      sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
+      shortcuts: DEFAULT_EDITOR_SETTINGS.shortcuts,
+    });
+    const saveEditorSettings = vi.fn().mockResolvedValue(undefined);
+    vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
+
+    const { useSettingsStore } = await import("@/stores/settingsStore");
+    const store = useSettingsStore();
+    await store.initEditorSettings();
+
+    expect(store.editorSettings.sqlFormatter.layoutStyle).toBe("dbx");
+    expect(store.editorSettings.sqlFormatterLayoutStyleDefaultVersion).toBe(SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION);
+    expect(saveEditorSettings).toHaveBeenCalledOnce();
+    expect(saveEditorSettings).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        sqlFormatter: expect.objectContaining({ layoutStyle: "dbx" }),
+        sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
+      }),
+    );
+  });
+
   it("initializes legacy settings before queueing formatter mutations", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({
       updateDownloadSource: "atomgit",
@@ -2040,6 +2083,7 @@ describe("settingsStore editor settings persistence", () => {
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
+      sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockRejectedValueOnce(new Error("save failed")).mockResolvedValueOnce(undefined);
     vi.doMock("@/lib/backend/api", () => ({ loadEditorSettings, saveEditorSettings }));
@@ -2088,6 +2132,7 @@ describe("settingsStore editor settings persistence", () => {
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
+      sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockImplementationOnce(
       () =>
@@ -2125,6 +2170,7 @@ describe("settingsStore editor settings persistence", () => {
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
+      sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockImplementationOnce(
       () =>

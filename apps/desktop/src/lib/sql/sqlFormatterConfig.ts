@@ -79,7 +79,7 @@ export interface SqlFormatterConfigFile {
 export type SqlFormatterConfigParseResult = { ok: true; settings: SqlFormatterSettings } | { ok: false; message: string };
 
 export const DEFAULT_SQL_FORMATTER_SETTINGS: SqlFormatterSettings = {
-  layoutStyle: "classic",
+  layoutStyle: "dbx",
   keywordCase: "upper",
   dataTypeCase: "preserve",
   functionCase: "preserve",

@@ -29,28 +29,27 @@ test("formats SQL with uppercase keywords and readable line breaks by default", 
   assert.match(formatted, /\nORDER BY\b/);
 });
 
-test("puts each SELECT field on its own line even when the statement fits on one line", async () => {
+test("aligns SELECT field continuations under the first field", async () => {
   const formatted = await formatSqlText("select id, name from users where active = 1 order by name", "postgres");
 
-  assert.equal(formatted, "SELECT\n  id,\n  name\nFROM users\nWHERE\n  active = 1\nORDER BY\n  name");
+  assert.equal(formatted, "SELECT id,\n       name\nFROM users\nWHERE active = 1\nORDER BY name");
   assert.equal(await formatSqlText(formatted, "postgres"), formatted);
 });
 
-test("aligns explicit SELECT aliases in the compact DBX layout", async () => {
-  const sql = "select bh.id as unique_value, bh.title as title, bh.house_type as type from biz_house bh";
-  const formatted = await formatSqlText(sql, "mysql", { layoutStyle: "dbx" });
+test("aligns explicit SELECT aliases in the default layout", async () => {
+  const formatted = await formatSqlText("select bh.id as unique_value, bh.title as title, bh.house_type as type from biz_house bh", "mysql");
 
   assert.equal(
     formatted,
     "SELECT bh.id         AS unique_value,\n       bh.title      AS title,\n       bh.house_type AS type\nFROM biz_house bh",
   );
-  assert.equal(await formatSqlText(formatted, "mysql", { layoutStyle: "dbx" }), formatted);
+  assert.equal(await formatSqlText(formatted, "mysql"), formatted);
 });
 
-test("expands a single-field statement into the default clause layout", async () => {
+test("collapses a single-field statement that fits on one line", async () => {
   const formatted = await formatSqlText("select id from users where active = 1 order by id", "postgres");
 
-  assert.equal(formatted, "SELECT\n  id\nFROM users\nWHERE\n  active = 1\nORDER BY\n  id");
+  assert.equal(formatted, "SELECT id FROM users WHERE active = 1 ORDER BY id");
 });
 
 test("formats SQL with custom keyword case and indentation settings", async () => {
@@ -73,8 +72,9 @@ test("formats SQL with custom keyword case and indentation settings", async () =
 
   assert.match(formatted, /^select\b/);
   assert.match(formatted, /\nfrom\b/);
-  // Each selected field starts on its own line; the configured indentation is a tab.
-  assert.match(formatted, /\n\t+name,/);
+  // Continuations align under the first element, and that padding is indentation
+  // at a column past the first tab stop, so it starts with tabs.
+  assert.match(formatted, /\n\t+ name,/);
   assert.doesNotMatch(formatted, /^SELECT\b/);
 });
 
@@ -99,26 +99,26 @@ test("keeps a trailing line comment from swallowing the column after it", async 
 
   assert.equal(
     formatted,
-    'CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT\n  trunc(sysdate) AS dates, -- 测试\n  (\n    SELECT\n      sysdate\n    FROM dual t\n  ) AS nows\nFROM dual;',
+    'CREATE VIEW "TEMP_TEST_VIEW" AS\nSELECT trunc(sysdate) AS dates,\n       -- 测试\n       (SELECT sysdate FROM dual t) AS nows\nFROM dual;',
   );
 });
 
 test("keeps a line comment from swallowing the separator after it", async () => {
   const formatted = await formatSqlText("select a -- c\n, b from t", "postgres", { keywordCase: "upper" });
 
-  assert.equal(formatted, "SELECT\n  a -- c\n,\n  b\nFROM t");
+  assert.equal(formatted, "SELECT a -- c\n,\n       b\nFROM t");
 });
 
 test("keeps a line comment from swallowing the statement terminator", async () => {
   const formatted = await formatSqlText("select a -- c\n;", "postgres", { keywordCase: "upper" });
 
-  assert.equal(formatted, "SELECT\n  a -- c\n;");
+  assert.equal(formatted, "SELECT a -- c\n;");
 });
 
 test("formats a comment on its own line without extra breaks", async () => {
   const formatted = await formatSqlText("select a, -- c\nb from t", "postgres", { keywordCase: "upper" });
 
-  assert.equal(formatted, "SELECT\n  a, -- c\n  b\nFROM t");
+  assert.equal(formatted, "SELECT a,\n       -- c\n       b\nFROM t");
 });
 
 test("compressSqlText collapses whitespace into single spaces", () => {
