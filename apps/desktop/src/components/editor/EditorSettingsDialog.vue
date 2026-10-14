@@ -151,6 +151,7 @@ import { clearDebugLogs as clearStoredDebugLogs, downloadDebugLogs, getDebugLogB
 import {
   aiTestConnection,
   loadCcSwitchAiConfigs,
+  loadMagpieAiConfigs,
   checkMcpServerStatus,
   installMcpServer,
   installNativeMcpServer,
@@ -286,7 +287,12 @@ import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
 import type { InstalledPlugin, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
-import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable } from "@/lib/ai/ccSwitch";
+import {
+  getCcSwitchPluginStatus,
+  isCcSwitchPluginAvailable,
+  isMagpieImportAvailable,
+  MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION,
+} from "@/lib/ai/ccSwitch";
 import { uuid } from "@/lib/common/utils";
 import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import {
@@ -5774,11 +5780,14 @@ async function saveWebSqlFileUploadMaxMbSetting() {
 // AI Config Delete Confirmation
 const aiDeleteConfirmOpen = ref(false);
 const aiDeleteConfigId = ref<string | null>(null);
-const aiCcSwitchImporting = ref(false);
+const aiConfigImporting = ref(false);
+const aiConfigImportingSource = ref<"cc-switch" | "magpie" | null>(null);
 const aiCcSwitchPlugins = ref<InstalledPlugin[]>([]);
 const aiCcSwitchPluginLoading = ref(false);
 const aiCcSwitchPluginStatus = computed(() => getCcSwitchPluginStatus(aiCcSwitchPlugins.value));
 const aiCcSwitchPluginAvailable = computed(() => isCcSwitchPluginAvailable(aiCcSwitchPlugins.value));
+const aiMagpiePluginAvailable = computed(() => isMagpieImportAvailable(aiCcSwitchPlugins.value));
+const magpieImportMinimumPluginVersion = MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION;
 const aiCcSwitchPluginStatusText = computed(() => {
   if (aiCcSwitchPluginLoading.value) return "ai.ccSwitchPluginChecking";
   return aiCcSwitchPluginStatus.value === "incompatible" ? "ai.ccSwitchPluginIncompatible" : "ai.ccSwitchPluginNotInstalledStatus";
@@ -6367,36 +6376,93 @@ function ccSwitchImportErrorMessage(error: unknown): string {
   return message;
 }
 
+function magpieImportErrorMessage(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (message === "magpieNotInstalled") return t("ai.magpieNotInstalled");
+  if (message === "magpieInvalidConfig") return t("ai.magpieInvalidConfig");
+  if (message === "magpieReadFailed") return t("ai.magpieReadFailed");
+  if (message === "ccSwitchPluginNotInstalled") return t("ai.ccSwitchPluginNotInstalled");
+  if (message.startsWith("magpieConfigDirectoryFailed:")) return t("ai.magpieConfigDirectoryFailed");
+  return message;
+}
+
+type AiImportMessageKey =
+  | "ai.ccSwitchNoNewConfigs"
+  | "ai.ccSwitchImportSuccess"
+  | "ai.ccSwitchImportPartial"
+  | "ai.magpieNoNewConfigs"
+  | "ai.magpieImportSuccess"
+  | "ai.magpieImportPartial";
+
+async function addImportedAiConfigs(
+  result: Awaited<ReturnType<typeof loadCcSwitchAiConfigs>>,
+  sourceName: "CC-SWITCH" | "Magpie",
+  noNewConfigsKey: AiImportMessageKey,
+  successKey: AiImportMessageKey,
+  partialKey: AiImportMessageKey,
+) {
+  const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, result.configs, sourceName);
+  if (prepared.length === 0) {
+    toast(t(noNewConfigsKey), 4000);
+    return;
+  }
+
+  const hadConfigs = settingsStore.aiConfigs.length > 0;
+  for (const [index, config] of prepared.entries()) {
+    await settingsStore.createAiConfig({
+      ...config,
+      id: generateId(),
+      isDefault: !hadConfigs && index === 0,
+    });
+  }
+  toast(
+    t(result.skipped.length > 0 ? partialKey : successKey, {
+      count: prepared.length,
+      skipped: result.skipped.length,
+    }),
+    4000,
+  );
+}
+
 async function aiImportCcSwitchConfigs() {
-  if (isWeb || aiCcSwitchImporting.value) return;
-  aiCcSwitchImporting.value = true;
+  if (isWeb || aiConfigImporting.value) return;
+  aiConfigImporting.value = true;
+  aiConfigImportingSource.value = "cc-switch";
   try {
     const result = await loadCcSwitchAiConfigs();
-    const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, result.configs);
-    if (prepared.length === 0) {
-      toast(t("ai.ccSwitchNoNewConfigs"), 4000);
-      return;
-    }
-
-    const hadConfigs = settingsStore.aiConfigs.length > 0;
-    for (const [index, config] of prepared.entries()) {
-      await settingsStore.createAiConfig({
-        ...config,
-        id: generateId(),
-        isDefault: !hadConfigs && index === 0,
-      });
-    }
-    toast(
-      t(result.skipped.length > 0 ? "ai.ccSwitchImportPartial" : "ai.ccSwitchImportSuccess", {
-        count: prepared.length,
-        skipped: result.skipped.length,
-      }),
-      4000,
+    await addImportedAiConfigs(
+      result,
+      "CC-SWITCH",
+      "ai.ccSwitchNoNewConfigs",
+      "ai.ccSwitchImportSuccess",
+      "ai.ccSwitchImportPartial",
     );
   } catch (error) {
     toast(ccSwitchImportErrorMessage(error), 5000);
   } finally {
-    aiCcSwitchImporting.value = false;
+    aiConfigImporting.value = false;
+    aiConfigImportingSource.value = null;
+  }
+}
+
+async function aiImportMagpieConfigs() {
+  if (isWeb || aiConfigImporting.value) return;
+  aiConfigImporting.value = true;
+  aiConfigImportingSource.value = "magpie";
+  try {
+    const result = await loadMagpieAiConfigs();
+    await addImportedAiConfigs(
+      result,
+      "Magpie",
+      "ai.magpieNoNewConfigs",
+      "ai.magpieImportSuccess",
+      "ai.magpieImportPartial",
+    );
+  } catch (error) {
+    toast(magpieImportErrorMessage(error), 5000);
+  } finally {
+    aiConfigImporting.value = false;
+    aiConfigImportingSource.value = null;
   }
 }
 
@@ -11053,11 +11119,17 @@ LIMIT 100;</pre>
                       </Button>
                     </div>
                     <div class="flex flex-wrap items-center gap-2">
-                      <Button type="button" size="sm" variant="outline" :disabled="aiCcSwitchImporting" @click="aiImportCcSwitchConfigs">
-                        <Loader2 v-if="aiCcSwitchImporting" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                      <Button type="button" size="sm" variant="outline" :disabled="aiConfigImporting" @click="aiImportCcSwitchConfigs">
+                        <Loader2 v-if="aiConfigImportingSource === 'cc-switch'" class="mr-1 h-3.5 w-3.5 animate-spin" />
                         <Upload v-else class="mr-1 h-3.5 w-3.5" />
-                        {{ aiCcSwitchImporting ? t("ai.ccSwitchImporting") : t("ai.ccSwitchImport") }}
+                        {{ aiConfigImportingSource === "cc-switch" ? t("ai.ccSwitchImporting") : t("ai.ccSwitchImport") }}
                       </Button>
+                      <Button v-if="aiMagpiePluginAvailable" type="button" size="sm" variant="outline" :disabled="aiConfigImporting" @click="aiImportMagpieConfigs">
+                        <Loader2 v-if="aiConfigImportingSource === 'magpie'" class="mr-1 h-3.5 w-3.5 animate-spin" />
+                        <Upload v-else class="mr-1 h-3.5 w-3.5" />
+                        {{ aiConfigImportingSource === "magpie" ? t("ai.magpieImporting") : t("ai.magpieImport") }}
+                      </Button>
+                      <p v-else class="text-xs text-muted-foreground">{{ t("ai.magpiePluginUpdateRequired", { version: magpieImportMinimumPluginVersion }) }}</p>
                     </div>
                   </div>
                 </div>
