@@ -3,7 +3,7 @@ import { formatSqlText } from "@/lib/sql/sqlFormatter";
 import { DEFAULT_SQL_FORMATTER_SETTINGS, type SqlFormatterSettings } from "@/lib/sql/sqlFormatterConfig";
 
 /**
- * Golden tests for the layout engine behind DBX's default formatting style.
+ * Golden tests for DBX's compact layout, kept as a selectable alternative.
  * The expectations for the queries in issues #827, #4850 and #5170 pin the
  * real-world shapes those reports asked for; the rest pin the rules those
  * examples exercise — the collapse of short statements, the wrap of long ones,
@@ -13,7 +13,7 @@ import { DEFAULT_SQL_FORMATTER_SETTINGS, type SqlFormatterSettings } from "@/lib
 type Dialect = Parameters<typeof formatSqlText>[1];
 
 async function format(sql: string, overrides: Partial<SqlFormatterSettings> = {}, dialect: Dialect = "mysql") {
-  return formatSqlText(sql, dialect, { ...DEFAULT_SQL_FORMATTER_SETTINGS, ...overrides });
+  return formatSqlText(sql, dialect, { ...DEFAULT_SQL_FORMATTER_SETTINGS, layoutStyle: "dbx", ...overrides });
 }
 
 const lines = (...rows: string[]) => rows.join("\n");
