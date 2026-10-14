@@ -287,12 +287,7 @@ import { isMacOS, isWindows } from "@/lib/backend/platform";
 import { combineDataTypeForDatabase, dataTypeLengthInputValue, getDataTypeOptions, getDefaultLengthForType, isDataTypeLengthDisabled, splitDataType } from "@/lib/table/tableStructureEditorState";
 import { useToast } from "@/composables/useToast";
 import type { InstalledPlugin, DatabaseType, SqlShortcutAction, SqlSnippet } from "@/types/database";
-import {
-  getCcSwitchPluginStatus,
-  isCcSwitchPluginAvailable,
-  isMagpieImportAvailable,
-  MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION,
-} from "@/lib/ai/ccSwitch";
+import { getCcSwitchPluginStatus, isCcSwitchPluginAvailable, isMagpieImportAvailable, MAGPIE_IMPORT_MINIMUM_PLUGIN_VERSION } from "@/lib/ai/ccSwitch";
 import { uuid } from "@/lib/common/utils";
 import { DEFAULT_SQL_SHORTCUT_SELECT_LIMIT } from "@/lib/sql/sqlDialectSelectLimit";
 import {
@@ -6386,21 +6381,9 @@ function magpieImportErrorMessage(error: unknown): string {
   return message;
 }
 
-type AiImportMessageKey =
-  | "ai.ccSwitchNoNewConfigs"
-  | "ai.ccSwitchImportSuccess"
-  | "ai.ccSwitchImportPartial"
-  | "ai.magpieNoNewConfigs"
-  | "ai.magpieImportSuccess"
-  | "ai.magpieImportPartial";
+type AiImportMessageKey = "ai.ccSwitchNoNewConfigs" | "ai.ccSwitchImportSuccess" | "ai.ccSwitchImportPartial" | "ai.magpieNoNewConfigs" | "ai.magpieImportSuccess" | "ai.magpieImportPartial";
 
-async function addImportedAiConfigs(
-  result: Awaited<ReturnType<typeof loadCcSwitchAiConfigs>>,
-  sourceName: "CC-SWITCH" | "Magpie",
-  noNewConfigsKey: AiImportMessageKey,
-  successKey: AiImportMessageKey,
-  partialKey: AiImportMessageKey,
-) {
+async function addImportedAiConfigs(result: Awaited<ReturnType<typeof loadCcSwitchAiConfigs>>, sourceName: "CC-SWITCH" | "Magpie", noNewConfigsKey: AiImportMessageKey, successKey: AiImportMessageKey, partialKey: AiImportMessageKey) {
   const prepared = prepareImportedAiConfigs(settingsStore.aiConfigs, result.configs, sourceName);
   if (prepared.length === 0) {
     toast(t(noNewConfigsKey), 4000);
@@ -6430,13 +6413,7 @@ async function aiImportCcSwitchConfigs() {
   aiConfigImportingSource.value = "cc-switch";
   try {
     const result = await loadCcSwitchAiConfigs();
-    await addImportedAiConfigs(
-      result,
-      "CC-SWITCH",
-      "ai.ccSwitchNoNewConfigs",
-      "ai.ccSwitchImportSuccess",
-      "ai.ccSwitchImportPartial",
-    );
+    await addImportedAiConfigs(result, "CC-SWITCH", "ai.ccSwitchNoNewConfigs", "ai.ccSwitchImportSuccess", "ai.ccSwitchImportPartial");
   } catch (error) {
     toast(ccSwitchImportErrorMessage(error), 5000);
   } finally {
@@ -6451,13 +6428,7 @@ async function aiImportMagpieConfigs() {
   aiConfigImportingSource.value = "magpie";
   try {
     const result = await loadMagpieAiConfigs();
-    await addImportedAiConfigs(
-      result,
-      "Magpie",
-      "ai.magpieNoNewConfigs",
-      "ai.magpieImportSuccess",
-      "ai.magpieImportPartial",
-    );
+    await addImportedAiConfigs(result, "Magpie", "ai.magpieNoNewConfigs", "ai.magpieImportSuccess", "ai.magpieImportPartial");
   } catch (error) {
     toast(magpieImportErrorMessage(error), 5000);
   } finally {
