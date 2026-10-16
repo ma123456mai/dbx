@@ -12,7 +12,6 @@ import {
   type CustomThemeColors,
   EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
   SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
-  SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
   enforceRightSidebarPanelExclusivity,
   getAiProviderPreset,
   getAiProviderPresetDefaultEndpoint,
@@ -80,13 +79,12 @@ describe("normalizeEditorSettings", () => {
     expect(normalizeEditorSettings({ welcomePageMode: "workspace", welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION }).welcomePageMode).toBe("workspace");
   });
 
-  it("preserves an explicitly selected formatter layout after the DBX-default migration", () => {
+  it("defaults SQL formatter layout to DBX and preserves an explicitly selected Classic layout", () => {
     expect(DEFAULT_EDITOR_SETTINGS.sqlFormatter.layoutStyle).toBe("dbx");
-    expect(DEFAULT_EDITOR_SETTINGS.sqlFormatterLayoutStyleDefaultVersion).toBe(SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION);
+    expect(normalizeEditorSettings({}).sqlFormatter.layoutStyle).toBe("dbx");
     expect(
       normalizeEditorSettings({
         sqlFormatter: { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, layoutStyle: "classic" },
-        sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
       }).sqlFormatter.layoutStyle,
     ).toBe("classic");
   });
@@ -2093,7 +2091,7 @@ describe("settingsStore editor settings persistence", () => {
     setActivePinia(createPinia());
   });
 
-  it("migrates the old Classic SQL formatter default to DBX layout", async () => {
+  it("preserves a previously selected Classic SQL formatter layout when loading saved settings", async () => {
     const loadEditorSettings = vi.fn().mockResolvedValue({
       sqlFormatter: { ...DEFAULT_EDITOR_SETTINGS.sqlFormatter, layoutStyle: "classic" },
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
@@ -2108,15 +2106,7 @@ describe("settingsStore editor settings persistence", () => {
     const store = useSettingsStore();
     await store.initEditorSettings();
 
-    expect(store.editorSettings.sqlFormatter.layoutStyle).toBe("dbx");
-    expect(store.editorSettings.sqlFormatterLayoutStyleDefaultVersion).toBe(SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION);
-    expect(saveEditorSettings).toHaveBeenCalledOnce();
-    expect(saveEditorSettings).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        sqlFormatter: expect.objectContaining({ layoutStyle: "dbx" }),
-        sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
-      }),
-    );
+    expect(store.editorSettings.sqlFormatter.layoutStyle).toBe("classic");
   });
 
   it("initializes legacy settings before queueing formatter mutations", async () => {
@@ -2157,7 +2147,6 @@ describe("settingsStore editor settings persistence", () => {
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
-      sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
       compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockRejectedValueOnce(new Error("save failed")).mockResolvedValueOnce(undefined);
@@ -2207,7 +2196,6 @@ describe("settingsStore editor settings persistence", () => {
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
-      sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
       compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockImplementationOnce(
@@ -2246,7 +2234,6 @@ describe("settingsStore editor settings persistence", () => {
       executeModeDefaultVersion: EXECUTE_MODE_CURRENT_DEFAULT_VERSION,
       sidebarBrowseObjectsOnDatabaseActivationMigrationVersion: SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION,
       welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
-      sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
       compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION,
     });
     const saveEditorSettings = vi.fn().mockImplementationOnce(

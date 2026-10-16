@@ -1002,7 +1002,6 @@ export interface EditorSettings {
   savedSqlOpenTargetMode: SavedSqlOpenTargetMode;
   welcomePageMode: WelcomePageMode;
   welcomePageModeDefaultVersion: number;
-  sqlFormatterLayoutStyleDefaultVersion: number;
   compactTabTitle: boolean;
   compactTabTitleDefaultVersion: number;
   tabLayout: TabLayoutMode;
@@ -1313,8 +1312,6 @@ export const SIDEBAR_BROWSE_OBJECTS_MIGRATION_VERSION = 1;
 // v1: the welcome page default moved from "intro" back to "workspace"; persisted
 // blobs from the intro-default builds lack this marker and are migrated.
 export const WELCOME_PAGE_DEFAULT_VERSION = 1;
-// v1: SQL formatting now uses DBX layout by default; prior saved "classic" defaults migrate.
-export const SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION = 1;
 // v1: compact tab titles became the default. A stored `compactTabTitle: false`
 // cannot be told apart from the old default, so this marker separates the two:
 // blobs written by the unwrapped-title builds lack it and migrate to the new
@@ -1375,7 +1372,6 @@ export const DEFAULT_EDITOR_SETTINGS: EditorSettings = {
   savedSqlOpenTargetMode: "saved",
   welcomePageMode: "workspace",
   welcomePageModeDefaultVersion: WELCOME_PAGE_DEFAULT_VERSION,
-  sqlFormatterLayoutStyleDefaultVersion: SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION,
   compactTabTitle: true,
   compactTabTitleDefaultVersion: COMPACT_TAB_TITLE_DEFAULT_VERSION,
   tabLayout: "scroll",
@@ -1912,8 +1908,6 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
   const savedWelcomePageDefaultVersion = settings.welcomePageModeDefaultVersion;
   const welcomePageModeDefaultVersion = typeof savedWelcomePageDefaultVersion === "number" && savedWelcomePageDefaultVersion >= WELCOME_PAGE_DEFAULT_VERSION ? savedWelcomePageDefaultVersion : WELCOME_PAGE_DEFAULT_VERSION;
   const hasCurrentWelcomePageDefault = welcomePageModeDefaultVersion === savedWelcomePageDefaultVersion;
-  const savedSqlFormatterLayoutStyleDefaultVersion = settings.sqlFormatterLayoutStyleDefaultVersion;
-  const sqlFormatterLayoutStyleDefaultVersion = typeof savedSqlFormatterLayoutStyleDefaultVersion === "number" && savedSqlFormatterLayoutStyleDefaultVersion >= SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION ? savedSqlFormatterLayoutStyleDefaultVersion : SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION;
   const savedCompactTabTitleDefaultVersion = settings.compactTabTitleDefaultVersion;
   const compactTabTitleDefaultVersion = typeof savedCompactTabTitleDefaultVersion === "number" && savedCompactTabTitleDefaultVersion >= COMPACT_TAB_TITLE_DEFAULT_VERSION ? savedCompactTabTitleDefaultVersion : COMPACT_TAB_TITLE_DEFAULT_VERSION;
   const hasCurrentCompactTabTitleDefault = compactTabTitleDefaultVersion === savedCompactTabTitleDefaultVersion;
@@ -2032,7 +2026,6 @@ export function normalizeEditorSettings(settings: Partial<EditorSettings>, exist
     savedSqlOpenTargetMode: settings.savedSqlOpenTargetMode === "current" ? "current" : DEFAULT_EDITOR_SETTINGS.savedSqlOpenTargetMode,
     welcomePageMode: hasCurrentWelcomePageDefault && (settings.welcomePageMode === "intro" || settings.welcomePageMode === "workspace") ? settings.welcomePageMode : DEFAULT_EDITOR_SETTINGS.welcomePageMode,
     welcomePageModeDefaultVersion,
-    sqlFormatterLayoutStyleDefaultVersion,
     compactTabTitle: hasCurrentCompactTabTitleDefault ? settings.compactTabTitle === true : DEFAULT_EDITOR_SETTINGS.compactTabTitle,
     compactTabTitleDefaultVersion,
     tabLayout: normalizeTabLayout(settings.tabLayout),
@@ -2462,12 +2455,6 @@ export const useSettingsStore = defineStore("settings", () => {
           };
           const needsExecuteModeDefaultMigration = typeof savedSettings.executeModeDefaultVersion !== "number" || savedSettings.executeModeDefaultVersion < EXECUTE_MODE_CURRENT_DEFAULT_VERSION;
           const needsWelcomePageDefaultMigration = typeof savedSettings.welcomePageModeDefaultVersion !== "number" || savedSettings.welcomePageModeDefaultVersion < WELCOME_PAGE_DEFAULT_VERSION;
-          const needsSqlFormatterLayoutStyleDefaultMigration = typeof savedSettings.sqlFormatterLayoutStyleDefaultVersion !== "number" || savedSettings.sqlFormatterLayoutStyleDefaultVersion < SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION;
-          if (needsSqlFormatterLayoutStyleDefaultMigration) {
-            // Before this marker, "classic" was also the default; switch old records to DBX layout once.
-            normalized.sqlFormatter = { ...normalized.sqlFormatter, layoutStyle: "dbx" };
-            normalized.sqlFormatterLayoutStyleDefaultVersion = SQL_FORMATTER_LAYOUT_STYLE_DEFAULT_VERSION;
-          }
           const needsCompactTabTitleDefaultMigration = typeof savedSettings.compactTabTitleDefaultVersion !== "number" || savedSettings.compactTabTitleDefaultVersion < COMPACT_TAB_TITLE_DEFAULT_VERSION;
           const needsTabNavigationShortcutMigration = needsTabNavigationHistoryShortcutMigration(savedSettings.shortcuts);
           const savedNullText = (savedSettings.dataGridExtractorOptions as Partial<DataGridExtractorOptions> | undefined)?.dsv?.nullText;
@@ -2478,16 +2465,7 @@ export const useSettingsStore = defineStore("settings", () => {
           const needsDataGridExtractorOptionsMigration =
             (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && (savedNullText === "NULL" || savedSqlIncludeDatabaseName === true);
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
-          if (
-            savedUpdateDownloadSource === "atomgit" ||
-            needsExecuteModeDefaultMigration ||
-            needsWelcomePageDefaultMigration ||
-            needsSqlFormatterLayoutStyleDefaultMigration ||
-            needsCompactTabTitleDefaultMigration ||
-            needsTabNavigationShortcutMigration ||
-            needsSidebarBrowseObjectsMigration ||
-            needsDataGridExtractorOptionsMigration
-          ) {
+          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsCompactTabTitleDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
             await enqueueEditorSettingsSave().catch(() => {});
           }
