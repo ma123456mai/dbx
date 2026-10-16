@@ -2478,7 +2478,16 @@ export const useSettingsStore = defineStore("settings", () => {
           const needsDataGridExtractorOptionsMigration =
             (typeof savedSettings.dataGridExtractorOptionsMigrationVersion !== "number" || savedSettings.dataGridExtractorOptionsMigrationVersion < DATA_GRID_EXTRACTOR_OPTIONS_MIGRATION_VERSION) && (savedNullText === "NULL" || savedSqlIncludeDatabaseName === true);
           const savedUpdateDownloadSource = (saved as { updateDownloadSource?: unknown }).updateDownloadSource;
-          if (savedUpdateDownloadSource === "atomgit" || needsExecuteModeDefaultMigration || needsWelcomePageDefaultMigration || needsSqlFormatterLayoutStyleDefaultMigration || needsCompactTabTitleDefaultMigration || needsTabNavigationShortcutMigration || needsSidebarBrowseObjectsMigration || needsDataGridExtractorOptionsMigration) {
+          if (
+            savedUpdateDownloadSource === "atomgit" ||
+            needsExecuteModeDefaultMigration ||
+            needsWelcomePageDefaultMigration ||
+            needsSqlFormatterLayoutStyleDefaultMigration ||
+            needsCompactTabTitleDefaultMigration ||
+            needsTabNavigationShortcutMigration ||
+            needsSidebarBrowseObjectsMigration ||
+            needsDataGridExtractorOptionsMigration
+          ) {
             // Persist one-time migrations so removed or unsafe defaults cannot reappear.
             await enqueueEditorSettingsSave().catch(() => {});
           }
