@@ -1,6 +1,7 @@
 import { nextTick } from "vue";
 import { createPinia, setActivePinia } from "pinia";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { nextTick } from "vue";
 import { TAB_TITLE_SUFFIX_MAX_LENGTH } from "@/lib/tabs/tabPresentation";
 
 const mocks = vi.hoisted(() => ({
