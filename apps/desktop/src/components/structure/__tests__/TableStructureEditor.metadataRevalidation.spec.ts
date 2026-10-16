@@ -233,6 +233,8 @@ vi.mock("@/components/editor/EditorSearchPanel.vue", async () => {
 vi.mock("@/stores/connectionStore", () => ({
   useConnectionStore: () => ({
     ensureConnected: mocks.ensureConnected,
+    connectionStateRevision: () => 0,
+    isCurrentConnectionStateRevision: () => true,
     getConfig: (connectionId: string) => (connectionId === mocks.connection.id ? mocks.connection : undefined),
   }),
 }));
@@ -269,6 +271,24 @@ vi.mock("@/lib/backend/api", () => ({
   getTablePartitionStatus: mocks.getTablePartitionStatus,
   getTableOwner: mocks.getTableOwner,
 }));
+vi.mock("@/lib/database/oracleConstraints", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("@/lib/database/oracleConstraints")>();
+  return {
+    ...actual,
+    readOracleIndexSnapshot: vi.fn(async (target) => ({
+      user: target.schema || "TEST",
+      currentSchema: target.schema || "TEST",
+      database: target.database,
+      databaseName: "ORCL",
+      objectId: "1",
+      columns: [],
+      userColumns: [],
+      columnReadMode: "strict-base" as const,
+      indexes: [],
+      indexNames: [],
+    })),
+  };
+});
 
 import TableStructureEditor from "@/components/structure/TableStructureEditor.vue";
 import { createColumnDrafts, createIndexDrafts } from "@/lib/table/tableStructureEditorState";
@@ -610,8 +630,6 @@ describe("TableStructureEditor column index actions", () => {
   it.each([
     ["Doris", "doris", "doris"],
     ["Doris MySQL profile", "mysql", "doris"],
-    ["StarRocks", "starrocks", "starrocks"],
-    ["StarRocks MySQL profile", "mysql", "starrocks"],
     ["GoldenDB", "goldendb", "goldendb"],
     ["SunDB", "sundb", "sundb"],
     ["Databend", "databend", "databend"],
@@ -623,6 +641,23 @@ describe("TableStructureEditor column index actions", () => {
     await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
     menuButton("structureEditor.createNormalIndex").click();
     await expectIndexName(root, "USERS_EMAIL_IDX");
+    expect(mocks.executeBatch).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["StarRocks", "starrocks", "starrocks"],
+    ["StarRocks MySQL profile", "mysql", "starrocks"],
+  ] as const)("disables unsupported ordinary index creation on %s", async (_label, databaseType, driverProfile) => {
+    mocks.connection.db_type = databaseType;
+    mocks.connection.driver_profile = driverProfile;
+    loadMetadata();
+    const root = await mountStructureEditor();
+    await openSubmenu(fieldRow(root, "email"), "structureEditor.createColumnIndex");
+    const button = menuButton("structureEditor.createNormalIndex");
+    expect(button.disabled).toBe(true);
+    button.click();
+    await settle();
+    expect(indexRow(root)).toBeNull();
     expect(mocks.executeBatch).not.toHaveBeenCalled();
   });
 

@@ -56,6 +56,7 @@ export type ShortcutActionId =
   | "reopenClosedTab"
   | "closeOtherTabs"
   | "closeAllTabs"
+  | "saveAllTabs"
   | "closeWindow"
   | "focusSearch"
   | "quickOpen"
@@ -94,6 +95,7 @@ export type ShortcutActionId =
   | "disconnectAllActiveConnections"
   | "openDataInNewTab"
   | "viewTableDdl"
+  | "editSidebarTableStructure"
   | "sendSelectionToAi"
   | "sqlIntentionActions";
 
@@ -508,6 +510,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     defaultShortcut: "",
   },
   {
+    id: "saveAllTabs",
+    labelKey: "contextMenu.saveAllTabs",
+    scope: "global",
+    defaultShortcut: "",
+  },
+  {
     id: "closeWindow",
     labelKey: "settings.shortcutCloseWindow",
     scope: "global",
@@ -737,6 +745,12 @@ export const SHORTCUT_DEFINITIONS: ShortcutDefinition[] = [
     labelKey: "settings.shortcutViewTableDdl",
     scope: "sidebar",
     defaultShortcut: "Shift+Mod+D",
+  },
+  {
+    id: "editSidebarTableStructure",
+    labelKey: "settings.shortcutEditSidebarTableStructure",
+    scope: "sidebar",
+    defaultShortcut: "F4",
   },
   {
     id: "sendSelectionToAi",

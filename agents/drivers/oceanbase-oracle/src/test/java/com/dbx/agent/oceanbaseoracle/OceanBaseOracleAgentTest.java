@@ -1023,6 +1023,23 @@ class OceanBaseOracleAgentTest {
     }
 
     @Test
+    void getColumnsPreservesFloatPrecisionAndNumberStarScale() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql, columnResultSet(new Object[][]{
+            {"F", "FLOAT", "Y", 63, null, 22, 0, null, null, 0, null},
+            {"FU", "FLOAT", "Y", null, null, 22, 0, null, null, 0, null},
+            {"NS", "NUMBER", "Y", null, 3, 22, 0, null, null, 0, null},
+            {"NN", "NUMBER", "Y", null, -2, 22, 0, null, null, 0, null},
+            {"NZ", "NUMBER", "Y", null, 0, 22, 0, null, null, 0, null},
+            {"NU", "NUMBER", "Y", null, null, 22, 0, null, null, 0, null}
+        })));
+        List<ColumnInfo> columns = agent.getColumns("APP", "NUMERIC_COLUMNS");
+        Assertions.assertEquals(List.of("FLOAT(63)", "FLOAT", "NUMBER(*,3)", "NUMBER(*,-2)", "NUMBER(*,0)", "NUMBER"),
+            columns.stream().map(ColumnInfo::getData_type).toList());
+    }
+
+    @Test
     void getColumnsResolvesTheCurrentSchemaWhenSchemaIsEmpty() {
         List<String> sql = new ArrayList<>();
         List<String> params = new ArrayList<>();
@@ -1277,6 +1294,40 @@ class OceanBaseOracleAgentTest {
         Assertions.assertTrue(sql.get(0).contains("ORDER BY COLUMN_POSITION"));
         Assertions.assertTrue(sql.get(1).contains("WHERE p.TABLE_OWNER = ? AND p.TABLE_NAME = ?"));
         Assertions.assertTrue(sql.get(3).contains("ALL_TAB_SUBPARTITIONS"));
+    }
+
+    @Test
+    void listsCompleteOracleUniqueConstraintAndPairedIndexMetadata() {
+        List<String> sql = new ArrayList<>();
+        OceanBaseOracleAgent agent = new OceanBaseOracleAgent();
+        TestSupport.setPrivateConnection(agent, preparedConnection(sql,
+            resultSet(new String[]{"CONSTRAINT_NAME", "CONSTRAINT_TYPE", "SEARCH_CONDITION", "STATUS", "VALIDATED",
+                "DEFERRABLE", "DEFERRED", "GENERATED", "RELY", "INDEX_OWNER", "INDEX_NAME", "COLUMN_NAME", "NULLABLE"},
+                new Object[][]{{"UQ_USERS_EMAIL", "U", null, "ENABLED", "VALIDATED", "NOT DEFERRABLE", "IMMEDIATE",
+                    "USER NAME", null, "APP", "UQ_USERS_EMAIL", "EMAIL", "Y"}}),
+            resultSet(new String[]{"OWNER", "TABLE_OWNER", "TABLE_NAME", "INDEX_TYPE", "UNIQUENESS", "STATUS",
+                "PARTITIONED", "VISIBILITY", "SECONDARY", "COLUMN_NAME", "DESCEND", "COLUMN_EXPRESSION", "COLUMN_POSITION"},
+                new Object[][]{{"APP", "APP", "USERS", "NORMAL", "UNIQUE", "VALID", "NO", "VISIBLE", null,
+                    "EMAIL", "ASC", null, 1}}),
+            resultSet(new String[]{"COUNT(*)"}, new Object[][]{{1}})));
+
+        var constraints = agent.listConstraints("APP", "USERS");
+
+        Assertions.assertEquals(1, constraints.size());
+        var metadata = constraints.get(0).oracle_metadata();
+        Assertions.assertTrue(metadata.metadataComplete());
+        Assertions.assertNull(metadata.rely());
+        Assertions.assertEquals("APP", metadata.indexOwner());
+        Assertions.assertEquals("exclusive", metadata.indexSharing());
+        Assertions.assertTrue(metadata.index().metadataComplete());
+        Assertions.assertNull(metadata.index().secondary());
+        Assertions.assertEquals(List.of("EMAIL"), metadata.index().columns());
+        Assertions.assertEquals(List.of("ASC"), metadata.index().directions());
+        Assertions.assertEquals(List.of(false), metadata.index().keyIsExpression());
+        Assertions.assertEquals(3, sql.size());
+        Assertions.assertTrue(sql.get(0).contains("c.RELY, c.INDEX_OWNER, c.INDEX_NAME"));
+        Assertions.assertTrue(sql.get(1).contains("ALL_IND_EXPRESSIONS"));
+        Assertions.assertTrue(sql.get(2).contains("COUNT(*) FROM ALL_CONSTRAINTS"));
     }
 
     private static ResultSet columnResultSet(Object[][] rows) {

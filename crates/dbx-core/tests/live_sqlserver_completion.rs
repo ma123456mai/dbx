@@ -1031,6 +1031,9 @@ async fn live_sqlserver_table_structure_default_changes_drop_existing_constraint
         is_gaussdb_m_mode: false,
         table_collation: None,
         primary_key_name: None,
+        primary_key_change: None,
+        oracle_foreign_key_changes: None,
+        oracle_constraint_changes: None,
     });
     assert_eq!(result.warnings, Vec::<String>::new());
     assert_eq!(result.statements.len(), 4);
@@ -1322,6 +1325,7 @@ async fn live_sqlserver_sql_file_import_executes_go_batches() {
         part_cooldown_ms: 0,
         skip_relational_constraints: false,
         failure_log_enabled: true,
+        encoding: Default::default(),
     };
     let done_seen = AtomicBool::new(false);
 

@@ -135,6 +135,7 @@ import {
 import { EDITOR_FONT_FAMILY_CSS_VAR, EDITOR_FONT_SIZE_CSS_VAR, createRunStatementButtonDom, loadEditorTheme, editorFontTheme } from "@/lib/editor/editorThemes";
 import { orderAiConfigsForDisplay } from "@/lib/ai/aiConfigOrdering";
 import { isAiConnectionTestConfigCurrent } from "@/lib/ai/aiConnectionTest";
+import { formatAiInlineMarkdownFragment, handleAiMarkdownLinkClick } from "@/lib/ai/aiMarkdown";
 import { MAX_AGENT_TURNS_DEFAULT, MAX_AGENT_TURNS_MAX, MAX_AGENT_TURNS_MIN, maxAgentTurnsOutOfRange, normalizeMaxAgentTurns } from "@/lib/ai/maxAgentTurns";
 import type { DriverStoreTab } from "@/lib/connection/agentDriverInstallHint";
 import ThemeCustomizerDialog from "./ThemeCustomizerDialog.vue";
@@ -367,7 +368,11 @@ import {
   MAX_WEB_DAV_AUTO_UPLOAD_INTERVAL_MINUTES,
   formatWebDavAutoUploadInterval,
   normalizedWebDavAutoUploadInterval,
+  readWebDavLastSuccessfulSync,
+  recordWebDavSyncSuccess,
   readSyncMethod,
+  WEB_DAV_LAST_SUCCESSFUL_SYNC_STORAGE_KEY,
+  WEB_DAV_SYNC_SUCCESS_EVENT,
   writeWebDavAutoUploadFields,
   writeWebDavBackupSelection,
   writeSyncMethod,
@@ -614,6 +619,8 @@ function onSettingsRootOpenChange(value: boolean) {
 function closeSettings() {
   requestCloseSettings(false);
 }
+
+defineExpose({ requestClose: closeSettings });
 
 function cancelUnsavedSettingsClose() {
   showUnsavedSettingsCloseConfirm.value = false;
@@ -4684,6 +4691,11 @@ const webdavAutoUploadIntervalHint = computed(() => {
 const webdavBusy = ref<"" | "test" | "upload" | "download">("");
 const webdavMessage = ref("");
 const webdavError = ref(false);
+const webdavLastSuccessfulSyncAt = ref<string | null>(null);
+const webdavLastSuccessfulSyncText = computed(() => {
+  if (!webdavLastSuccessfulSyncAt.value) return t("settings.syncNeverSuccessful");
+  return new Date(webdavLastSuccessfulSyncAt.value).toLocaleString(locale.value);
+});
 const localBackupSecretsPassphrase = ref("");
 const localBackupBusy = ref<"" | "export" | "import">("");
 const localBackupMessage = ref("");
@@ -4917,6 +4929,14 @@ function currentWebDavConfig(): WebDavConfig {
     remotePath: webdavRemotePath.value.trim() || DEFAULT_WEB_DAV_REMOTE_PATH,
     userAgent: webdavUserAgent.value.trim() || undefined,
   };
+}
+
+function refreshWebDavLastSuccessfulSync() {
+  webdavLastSuccessfulSyncAt.value = readWebDavLastSuccessfulSync(currentWebDavConfig());
+}
+
+function onWebDavSyncStatusStorage(event: StorageEvent) {
+  if (event.key === null || event.key === WEB_DAV_LAST_SUCCESSFUL_SYNC_STORAGE_KEY) refreshWebDavLastSuccessfulSync();
 }
 
 function currentWebDavAccountConfig(): WebDavConfig {
@@ -5182,7 +5202,9 @@ async function confirmSyncSelection(selection: SyncSelection) {
   webdavSyncSecrets.value = selection.includeSecrets;
   if (syncSelectionMode.value === "upload") {
     await runWebDavAction("upload", async () => {
-      const summary = await webdavSyncUpload(currentWebDavConfig(), settingsStore.editorSettings, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+      const config = currentWebDavConfig();
+      const summary = await webdavSyncUpload(config, settingsStore.editorSettings, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+      recordWebDavSyncSuccess(config);
       writeWebDavBackupSelection(selection);
       return t("settings.syncUploadSuccess", { bytes: summary.bytes, path: summary.remotePath });
     });
@@ -5190,13 +5212,15 @@ async function confirmSyncSelection(selection: SyncSelection) {
   }
 
   await runWebDavAction("download", async () => {
-    const result = await webdavSyncDownload(currentWebDavConfig(), selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
+    const config = currentWebDavConfig();
+    const result = await webdavSyncDownload(config, selection.includeSecrets ? webdavSecretsPassphrase.value || undefined : undefined, selection.includeSecrets, selection);
     if (result.editorSettings && typeof result.editorSettings === "object") settingsStore.updateEditorSettings(result.editorSettings as any);
     await settingsStore.updateDesktopSettings(result.desktopSettings);
     await connectionStore.initFromDisk();
     await savedSqlStore.initFromStorage();
     await tunnelProfileStore.refresh();
     await settingsStore.reloadAiConfigs();
+    recordWebDavSyncSuccess(config);
     const message = t("settings.syncDownloadSuccess", { bytes: result.summary.bytes, path: result.summary.remotePath });
     if (result.applySummary.encryptedSecretsPresent && !result.applySummary.secretsApplied) return `${message} ${t("settings.syncSecretsSkipped")}`;
     if (result.applySummary.secretsApplied) return `${message} ${t("settings.syncSecretsApplied")}`;
@@ -5337,6 +5361,7 @@ watch(
 watch([webdavEndpoint, webdavUsername], () => {
   void refreshWebDavPasswordStatus();
 });
+watch([webdavEndpoint, webdavUsername, webdavRemotePath], refreshWebDavLastSuccessfulSync);
 watch(webdavRememberPassword, (val) => {
   localStorage.setItem("dbx-webdav-remember-password", String(val));
 });
@@ -5411,6 +5436,9 @@ onMounted(() => {
   // 留着，回到 DBX 时再把焦点还给录入按钮；同时把「窗口不在前台」这件事显示出来。
   window.addEventListener("focus", onShortcutRecordingWindowFocus);
   window.addEventListener("blur", onShortcutRecordingWindowBlur);
+  window.addEventListener(WEB_DAV_SYNC_SUCCESS_EVENT, refreshWebDavLastSuccessfulSync);
+  window.addEventListener("storage", onWebDavSyncStatusStorage);
+  refreshWebDavLastSuccessfulSync();
   void refreshWebDavPasswordStatus();
   if (!isWeb) void refreshCcSwitchPluginAvailability();
   checkLayoutDescTruncation();
@@ -5425,6 +5453,8 @@ onUnmounted(() => {
   window.removeEventListener("compositionstart", modifierDoubleTapRecorder.cancel, true);
   window.removeEventListener("focus", onShortcutRecordingWindowFocus);
   window.removeEventListener("blur", onShortcutRecordingWindowBlur);
+  window.removeEventListener(WEB_DAV_SYNC_SUCCESS_EVENT, refreshWebDavLastSuccessfulSync);
+  window.removeEventListener("storage", onWebDavSyncStatusStorage);
   modifierDoubleTapRecorder.reset();
   clearThemePaletteOptionPreview();
   clearUiFontOptionPreview();
@@ -5811,6 +5841,7 @@ const aiEditQoderCliEnvRows = ref<AiEnvRow[]>([]);
 const aiAnthropicMessagesMode = computed(() => aiEditApiStyle.value === "anthropic-messages");
 const selectedAiProviderPreset = computed(() => getAiProviderPresetOption(aiEditProviderPresetId.value));
 const selectedAiPartnerPreset = computed(() => (isAiPartnerProviderPreset(selectedAiProviderPreset.value) ? selectedAiProviderPreset.value : null));
+const selectedAiPartnerDescriptionHtml = computed(() => (selectedAiPartnerPreset.value ? formatAiInlineMarkdownFragment(t(selectedAiPartnerPreset.value.descriptionKey)) : ""));
 const aiIsCcSwitchProvider = computed(() => aiEditProviderPresetId.value === CC_SWITCH_PROVIDER_ID);
 
 const aiTesting = ref(false);
@@ -8578,6 +8609,7 @@ onUnmounted(() => {
                     <SelectItem value="comment-aligned">{{ t("settings.sidebarObjectInfoModeCommentAligned") }}</SelectItem>
                     <SelectItem value="comment-right">{{ t("settings.sidebarObjectInfoModeCommentRight") }}</SelectItem>
                     <SelectItem value="size">{{ t("settings.sidebarObjectInfoModeSize") }}</SelectItem>
+                    <SelectItem value="comment-and-size">{{ t("settings.sidebarObjectInfoModeCommentAndSize") }}</SelectItem>
                     <SelectItem value="hidden">{{ t("settings.sidebarObjectInfoModeHidden") }}</SelectItem>
                   </SelectContent>
                 </Select>
@@ -10260,6 +10292,9 @@ LIMIT 100;</pre>
                     </div>
                   </div>
 
+                  <p class="text-xs text-muted-foreground" aria-live="polite">
+                    {{ t("settings.syncLastSuccessful", { time: webdavLastSuccessfulSyncText }) }}
+                  </p>
                   <div v-if="webdavMessage" class="text-xs" :class="webdavError ? 'text-destructive' : 'text-green-600 dark:text-green-400'">
                     {{ webdavMessage }}
                   </div>
@@ -10991,7 +11026,7 @@ LIMIT 100;</pre>
                     </Select>
                     <div v-if="selectedAiPartnerPreset" class="flex items-center gap-3 rounded-md border border-primary/20 bg-primary/5 px-3 py-2">
                       <div class="min-w-0 flex-1">
-                        <p class="whitespace-pre-line text-[11px] leading-4 text-muted-foreground">{{ t(selectedAiPartnerPreset.descriptionKey) }}</p>
+                        <p class="whitespace-pre-line text-[11px] leading-4 text-muted-foreground [&_a]:text-primary [&_a]:underline" @click="handleAiMarkdownLinkClick($event, openExternalUrl)" v-html="selectedAiPartnerDescriptionHtml"></p>
                       </div>
                       <Button type="button" variant="ghost" size="icon" class="h-7 w-7 shrink-0" :title="t('ai.visitPartner')" :aria-label="t('ai.visitPartner')" @click="openExternalUrl(selectedAiPartnerPreset.websiteUrl)">
                         <ExternalLink class="h-3.5 w-3.5" />
@@ -11825,7 +11860,7 @@ LIMIT 100;</pre>
                       <TabsList class="settings-mcp-config-tabs h-auto min-h-8 w-full min-w-0 max-w-full justify-start gap-1 overflow-x-auto overflow-y-hidden overscroll-x-contain group-data-horizontal/tabs:h-auto">
                         <TabsTrigger value="claude" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Claude Code</TabsTrigger>
                         <TabsTrigger value="cursor" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">Cursor</TabsTrigger>
-                        <TabsTrigger value="codebuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">CodeBuddy Code</TabsTrigger>
+                        <TabsTrigger value="codebuddy" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">CodeBuddy Code CLI</TabsTrigger>
                         <TabsTrigger value="zcode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">ZCode</TabsTrigger>
                         <TabsTrigger value="trae" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">TRAE</TabsTrigger>
                         <TabsTrigger value="vscode" class="settings-mcp-config-tab h-7 flex-none shrink-0 px-2.5">VS Code</TabsTrigger>

@@ -1,9 +1,18 @@
 <script setup lang="ts">
 import { Compartment } from "@codemirror/state";
 import { keymap as codeMirrorKeymap } from "@codemirror/view";
+import { getStarRocksCapabilities } from "@/lib/table/starrocksCapabilities";
+import { starRocksAlterOptionsFromDdl, starRocksColumnDefinitionLocked, type StarRocksAlterOptions } from "@/lib/table/starrocksAlterOptions";
+import { getColumnDefaultValuePresets } from "@/lib/table/columnDefaultPresets";
 import { applyDdlStoragePreference } from "@/lib/sql/ddlStorage";
 import DdlStorageToggle from "@/components/objects/DdlStorageToggle.vue";
 import StructureIndexColumnPicker from "./StructureIndexColumnPicker.vue";
+import DangerConfirmDialog from "@/components/editor/DangerConfirmDialog.vue";
+import { executeOceanbasePrimaryKeyPlan, readOceanbasePrimaryKeySnapshot, prepareOraclePrimaryKeyChange, OceanbasePrimaryKeyValidationError, type ExistingPrimaryKeyChange, type OceanbasePrimaryKeyPlan, type PrimaryKeyTarget } from "@/lib/database/oceanbasePrimaryKey";
+import { executeOracleForeignKeyCreatePlan, executeOracleForeignKeyPlan, prepareOracleForeignKeyCreatePlan, prepareOracleForeignKeyPlan, readOracleForeignKeyDefinitions, type OracleForeignKeyCreatePlan, type OracleForeignKeyPlan } from "@/lib/database/oracleForeignKeys";
+import { executeOracleConstraintPlan, oracleConstraintDefinitionFromInfo, prepareOracleConstraintPlan, type OracleConstraintPlan, type OracleConstraintTarget } from "@/lib/database/oracleConstraints";
+import { executeOracleIndexPlan, mergeOracleIndexDraftsAfterRefresh, oracleIndexSnapshotMatchesLoaded, oracleIndexSnapshotMatchesLoadedColumns, prepareOracleIndexPlan, type OracleIndexDefinition, type OracleIndexLoadBaseline, type OracleIndexPlan } from "@/lib/database/oracleIndexes";
+import { readOracleIndexSnapshot } from "@/lib/database/oracleConstraints";
 
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, shallowRef, watch } from "vue";
 import { uuid } from "@/lib/common/utils";
@@ -47,11 +56,17 @@ import { DropdownMenu, DropdownMenuContent, DropdownMenuItem, DropdownMenuTrigge
 import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@/components/ui/tooltip";
 import { SearchableSelect } from "@/components/ui/searchable-select";
+import StarRocksAlterStatus from "@/components/structure/StarRocksAlterStatus.vue";
+import StarRocksSortKeyEditor from "@/components/structure/StarRocksSortKeyEditor.vue";
+import StarRocksLayoutCopyDialog from "@/components/structure/StarRocksLayoutCopyDialog.vue";
+import StarRocksPhysicalOptionsEditor from "@/components/structure/StarRocksPhysicalOptionsEditor.vue";
+import { buildStarRocksDialectOptions, emptyStarRocksPhysicalOptions, hasStarRocksPhysicalOptions, restoreStarRocksPhysicalOptions } from "@/lib/table/starrocksPhysicalOptions";
 import TablePhysicalOptionsEditor from "@/components/structure/TablePhysicalOptionsEditor.vue";
 import CustomContextMenu, { type ContextMenuItem } from "@/components/ui/CustomContextMenu.vue";
 import EditorSearchPanel from "@/components/editor/EditorSearchPanel.vue";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { useConnectionStore } from "@/stores/connectionStore";
+import { connectionConfigFingerprint } from "@/lib/connection/connectionDatabaseInfo";
 import { useProductionSafetyStore } from "@/stores/productionSafetyStore";
 import { productionContextForDatabase } from "@/lib/database/productionSafety";
 import { useQueryStore } from "@/stores/queryStore";
@@ -64,6 +79,9 @@ import { useTheme } from "@/composables/useTheme";
 import { editorFontTheme, loadEditorTheme } from "@/lib/editor/editorThemes";
 import { createDbxCodeMirrorSqlDialect } from "@/lib/editor/codemirrorSqlDialect";
 import { useToast } from "@/composables/useToast";
+import { fetchNamespaceOptionsForConnection, fetchCatalogNamespaceOptions, namespaceOptionsAreSchemas, normalizedQueryTabCatalog, selectedQueryCatalogName } from "@/composables/useDatabaseOptions";
+import { schemaOptionsForConnection } from "@/composables/useSchemaOptions";
+import { connectionIsDorisFamilyCatalogCapable, isSchemaAware } from "@/lib/database/databaseFeatureSupport";
 import { useVerticalOverlayScrollbar } from "@/composables/useVerticalOverlayScrollbar";
 import { type SqlHighlighter, createShikiSqlHighlighter } from "@/lib/sql/sqlHighlighter";
 import { joinSqlStatementsForScript } from "@/lib/sql/sqlBatchScript";
@@ -86,6 +104,8 @@ import {
   type EditableStructureForeignKey,
   type EditableStructureIndex,
   type EditableStructureTrigger,
+  type OracleConstraintChange,
+  type OracleConstraintDefinition,
   type TablePartitionBoundDraft,
   type TablePartitionOperation,
   type TablePartitionOperationKind,
@@ -108,9 +128,9 @@ import { canAddTableStructureColumn, getTableStructureCapabilities, hasLocalTabl
 import { getConcurrentIndexAvailability, concurrentIndexNamesInStatements, normalizeUnsupportedConcurrentIndexes, type ConcurrentIndexAvailability } from "@/lib/table/concurrentIndexAvailability";
 import { orderedColumnIndexes, uniqueDataGridColumnOrderKeys } from "@/lib/dataGrid/dataGridColumnOrder";
 import { loadTableDataGridColumnOrder, notifyTableDataGridColumnOrderChanged, removeTableDataGridColumnOrder, saveTableDataGridColumnOrder, tableDataGridColumnOrderScopeKey } from "@/lib/dataGrid/dataGridColumnLayoutStorage";
-import { codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
+import { codeMirrorSqlDialectForConnection, connectionObjectTreeQuerySchema, connectionUsesDatabaseObjectTreeMode, tableStructureDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { postgresListRolesSql, usersFromPostgresRolesResult } from "@/lib/database/databaseUserAdmin";
-import type { ColumnInfo, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
+import type { CatalogInfo, ColumnInfo, ConnectionConfig, ConstraintInfo, PgPartitionKind, PgPartitionNode, PgTablePartitioning, TableInfo, TableInfoTab, TableStructureEditorDraft, TableStructureEditorTarget, TableStructureEditorViewport } from "@/types/database";
 import {
   applyManticoreDdlColumnExtras,
   buildStructureTargetLabel,
@@ -527,7 +547,31 @@ async function fetchDdl(force = false) {
 const errorMessage = ref("");
 const secondaryMetadataErrors = ref<Partial<Record<ObjectMetadataFacet, string>>>({});
 const columns = ref<EditableStructureColumn[]>([]);
+const starrocksStatusBusy = ref(false);
+const starrocksStatusRevision = ref(0);
+const starrocksSubmittedSql = ref<{ target: string; sql: string }>();
+const starrocksStatusTarget = computed(() => JSON.stringify([props.connectionId, props.database, props.tableName, props.schema, props.catalog]));
+const starrocksDraftDirty = computed(() => hasPendingStructureChanges() || ddlDirty.value);
+const starrocksAlterContext = ref<StarRocksAlterOptions>();
+const starrocksLayoutCopyOpen = ref(false);
+const starrocksSortColumns = ref<string[]>();
+const pendingStarRocksSort = computed(() => (starrocksSortColumns.value && starrocksAlterContext.value?.sortColumns && JSON.stringify(starrocksSortColumns.value) !== JSON.stringify(starrocksAlterContext.value.sortColumns) ? starrocksSortColumns.value : undefined));
+async function authorizeStarRocksLayoutCopy(sql: string): Promise<boolean> {
+  const config = store.getConfig(props.connectionId);
+  const productionContext = productionContextForDatabase(config, props.database);
+  return !productionContext.active || (await productionSafetyStore.requestConfirmation({ sql, connectionName: config?.name, database: props.database, productionDatabases: productionContext.databases, source: t("starrocksLayout.copyTitle") }));
+}
 const copyColumnsDialogOpen = ref(false);
+const copySourceConnectionId = ref("");
+const copySourceDatabase = ref("");
+const copySourceSchema = ref("");
+const copySourceCatalog = ref("");
+const copySourceDatabases = ref<string[]>([]);
+const copySourceSchemas = ref<string[]>([]);
+const copySourceCatalogs = ref<CatalogInfo[]>([]);
+const copySourceScopeLoading = ref(false);
+const copySourceScopeReady = ref(false);
+let copySourceScopeRequestId = 0;
 const copySourceTables = ref<TableInfo[]>([]);
 const copySourceTableName = ref("");
 const copySourceTableSearch = ref("");
@@ -617,6 +661,9 @@ const pendingStatements = ref<string[]>([]);
 const warnings = ref<string[]>([]);
 const sqliteSchemaRevision = ref<string>();
 const foreignKeys = ref<EditableStructureForeignKey[]>([]);
+const foreignKeyDefinitionBusy = ref(false);
+const foreignKeyReferenceColumns = ref<Record<string, ColumnInfo[]>>({});
+const foreignKeyReferenceListPrefix = `oracle-fk-columns-${uuid()}`;
 const constraints = ref<ConstraintInfo[]>([]);
 const constraintsLoaded = ref(false);
 // Structured PostgreSQL partitioning view (partitioned parent, its descendant
@@ -932,7 +979,7 @@ function columnChanged(column: EditableStructureColumn, index: number): boolean 
   if (!column.original || column.markedForDrop) return true;
   const original = column.original;
   return (
-    isPhysicalTableColumnOrderChange(databaseType.value, connection.value?.db_type, column.originalPosition, index) ||
+    isPhysicalTableColumnOrderChange(databaseType.value, connection.value?.db_type, column.originalPosition, index, structureCapabilities.value.reorderColumn ? starrocksAlterContext.value?.model : undefined) ||
     column.name !== original.name ||
     column.dataType !== original.data_type ||
     column.isNullable !== original.is_nullable ||
@@ -946,7 +993,7 @@ function columnChanged(column: EditableStructureColumn, index: number): boolean 
 }
 
 function indexChanged(index: EditableStructureIndex): boolean {
-  if (!index.original || index.markedForDrop) return true;
+  if (!index.original || index.oracleOriginalMissing || index.markedForDrop) return true;
   const original = index.original;
   return (
     index.name !== original.name ||
@@ -962,6 +1009,18 @@ function indexChanged(index: EditableStructureIndex): boolean {
 
 function foreignKeyChanged(foreignKey: EditableStructureForeignKey): boolean {
   if (!foreignKey.original || foreignKey.markedForDrop) return true;
+  if (foreignKey.oracleOriginal) {
+    const original = foreignKey.oracleOriginal;
+    return (
+      foreignKey.name !== original.name ||
+      JSON.stringify(foreignKey.columns) !== JSON.stringify(original.columns) ||
+      foreignKey.refSchema !== original.refSchema ||
+      foreignKey.refTable !== original.refTable ||
+      JSON.stringify(foreignKey.refColumns) !== JSON.stringify(original.refColumns) ||
+      (foreignKey.onDelete || "NO ACTION") !== original.onDelete ||
+      JSON.stringify(foreignKey.oracleState) !== JSON.stringify(original.state)
+    );
+  }
   const original = foreignKey.original;
   return (
     foreignKey.name !== original.name ||
@@ -974,15 +1033,33 @@ function foreignKeyChanged(foreignKey: EditableStructureForeignKey): boolean {
   );
 }
 
+function oracleForeignKeyChanges() {
+  return foreignKeys.value.filter(foreignKeyChanged).map((foreignKey) => {
+    const original = foreignKey.oracleOriginal ?? null;
+    const target = foreignKey.markedForDrop
+      ? null
+      : {
+          name: foreignKey.name,
+          columns: [...(foreignKey.columns ?? [])],
+          refSchema: foreignKey.refSchema,
+          refTable: foreignKey.refTable,
+          refColumns: [...(foreignKey.refColumns ?? [])],
+          onDelete: (foreignKey.onDelete || "NO ACTION") as "NO ACTION" | "CASCADE" | "SET NULL",
+          state: { ...(foreignKey.oracleState ?? { enabled: true, validated: true, deferrable: false, initiallyDeferred: false, rely: false }) },
+        };
+    return { original, target };
+  });
+}
+
 function triggerChanged(trigger: EditableStructureTrigger): boolean {
   if (!trigger.original || trigger.markedForDrop) return true;
   const original = trigger.original;
-  return trigger.name !== original.name || trigger.timing !== original.timing || trigger.event !== original.event || !sameText(trigger.statement, original.statement);
+  return trigger.name !== original.name || trigger.timing !== original.timing || trigger.event !== original.event || !sameText(trigger.statement, original.statement) || (trigger.enabled !== undefined && trigger.enabled !== original.enabled);
 }
 
 function captureStructureRefreshScope(): TableStructureRefreshScope {
   return {
-    columns: columns.value.some(columnChanged),
+    columns: columns.value.some(columnChanged) || !!pendingStarRocksSort.value,
     indexes: indexes.value.some(indexChanged),
     foreignKeys: foreignKeys.value.some(foreignKeyChanged),
     // Constraints have no editable draft of their own, but column/index/FK
@@ -1373,12 +1450,17 @@ const usesNativeMysqlIndexNames = computed(() => {
 });
 const supportsCharacterLengthUnits = computed(() => databaseType.value === "dameng" || databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
 const usesMysql8SafeDefaults = computed(() => databaseType.value === "mysql" && connection.value?.db_type === "mysql" && connection.value.driver_profile === "mysql");
-const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion));
+const structureCapabilities = computed(() => getTableStructureCapabilities(databaseType.value, connection.value?.db_type, connection.value?.database_info?.productVersion, starrocksAlterContext.value?.model));
 const tableMetadataCapabilities = computed(() => getTableMetadataCapabilities(databaseType.value));
 const structureDialect = computed(() => structureCapabilities.value.dialect);
-const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment);
+const isTableCommentDisabled = computed(() => !structureCapabilities.value.comment || (!isCreateMode.value && databaseType.value === "starrocks" && !getStarRocksCapabilities(connection.value?.database_info?.productVersion).tableComment));
 const dynamicDataTypeOptions = ref<string[]>([]);
-const dataTypeOptions = computed(() => mergeDataTypeOptions(dynamicDataTypeOptions.value, getDataTypeOptions(databaseType.value)));
+const dataTypeOptions = computed(() => {
+  const options = getDataTypeOptions(databaseType.value, dynamicDataTypeOptions.value, connection.value?.database_info?.productVersion);
+  if (databaseType.value !== "oceanbase-oracle") return options;
+  // JDBC may advertise Oracle types that OceanBase rejects.
+  return options.filter((type) => !/^(?:nclob|long(?:\s+raw)?|bfile|boolean|vector)\s*(?:\(|$)/i.test(type.trim()));
+});
 const columnEditorControls = computed(() => getColumnEditorControls(databaseType.value));
 
 const indexTypesByDb: Record<string, string[]> = {
@@ -1459,9 +1541,19 @@ const defaultValuePresets = computed((): DefaultValuePreset[] => {
 
   return [...universal, ...(dialectPresets[structureDialect.value] ?? [])];
 });
+function columnDefaultValuePresets(column: EditableStructureColumn): DefaultValuePreset[] {
+  if (databaseType.value !== "starrocks") return defaultValuePresets.value;
+  return getColumnDefaultValuePresets(column, {
+    databaseType: databaseType.value,
+    dialect: structureDialect.value,
+    serverVersion: connection.value?.database_info?.productVersion,
+    unsetLabel: t("structureEditor.unsetDefault"),
+    isCreateMode: isCreateMode.value,
+  }).map((preset) => ({ ...preset, dataType: column.dataType }));
+}
 
 const showExtendedProperties = computed(() => supportsTableStructureExtendedProperties(databaseType.value));
-const showCharacterSet = computed(() => structureDialect.value === "mysql");
+const showCharacterSet = computed(() => structureDialect.value === "mysql" && databaseType.value !== "starrocks");
 
 const serverCharsetMetadata = ref<CreateDatabaseCharsetMetadata>();
 const charsetMetadataLoading = ref(false);
@@ -1916,7 +2008,7 @@ const tableStoresCaseSensitiveIdentifiers = computed(() => {
 });
 const usesSqliteRebuildStrategy = computed(() => !isCreateMode.value && structureCapabilities.value.alterStrategy === "sqlite-rebuild");
 const hasSqliteTypeChange = computed(() => usesSqliteRebuildStrategy.value && hasExistingColumnTypeChange(columns.value));
-const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.value, isCreateMode.value));
+const canAddColumn = computed(() => canAddTableStructureColumn(databaseType.value, isCreateMode.value) && (isCreateMode.value || databaseType.value !== "starrocks" || ["primary", "duplicate"].includes(starrocksAlterContext.value?.model ?? "")));
 const newTableName = ref("");
 const tableComment = ref("");
 const originalTableComment = ref("");
@@ -1927,6 +2019,7 @@ const mysqlAutoIncrementLoadError = ref("");
 const mysqlTableEngine = ref("");
 const originalMysqlTableEngine = ref("");
 const physicalOptions = ref(emptyTablePhysicalOptions());
+const starrocksPhysicalOptions = ref(emptyStarRocksPhysicalOptions());
 watch(
   () => columns.value.filter((column) => !column.markedForDrop).map((column) => column.id),
   (ids) => {
@@ -1946,6 +2039,248 @@ const tableOwnerRolesLoading = ref(false);
 const tableOwnerRolesLoadError = ref("");
 const supportsTableOwner = computed(() => !isCreateMode.value && databaseType.value === "postgres");
 const primaryKeyName = ref("");
+const existingPrimaryKeyDraft = ref<ExistingPrimaryKeyChange>();
+const existingPrimaryKeyPlan = shallowRef<OceanbasePrimaryKeyPlan>();
+const existingPrimaryKeySession = ref<{ revision: number; configFingerprint: string }>();
+const existingOracleForeignKeyPlan = shallowRef<OracleForeignKeyPlan>();
+const existingOracleForeignKeySession = ref<{ revision: number; configFingerprint: string }>();
+const newOracleForeignKeyPlan = shallowRef<OracleForeignKeyCreatePlan>();
+const newOracleForeignKeySession = ref<{ revision: number; configFingerprint: string; draftFingerprint: string }>();
+const oracleForeignKeyBusy = ref(false);
+const oracleConstraintDraft = ref<OracleConstraintChange>();
+const oracleConstraintPlan = shallowRef<OracleConstraintPlan>();
+const oracleConstraintSession = ref<{ revision: number; configFingerprint: string; draftFingerprint: string }>();
+const oracleConstraintBusy = ref(false);
+const oracleIndexPlan = shallowRef<OracleIndexPlan>();
+const oracleIndexBusy = ref(false);
+const oracleIndexEpoch = ref(0);
+const oracleIndexReady = shallowRef<OracleIndexLoadBaseline>();
+const oracleIndexRefreshGuard = ref<{ target: string; afterRequestId: number; completedCreates: OracleIndexDefinition[] }>();
+const oracleIndexConfirmationScope = `structure-oracle-index:${uuid()}`;
+const oracleConstraintConfirmationScope = `structure-oracle-constraint:${uuid()}`;
+const oracleConstraintChanged = computed(() => !!oracleConstraintDraft.value && JSON.stringify(oracleConstraintDraft.value.original) !== JSON.stringify(oracleConstraintDraft.value.target));
+const primaryKeyNewColumn = ref("");
+const primaryKeyBusy = ref(false);
+const primaryKeyResultOpen = ref(false);
+const primaryKeyResultMessage = ref("");
+const primaryKeyResultDetails = ref("");
+const primaryKeyResultTitle = ref("oceanbasePrimaryKey.resultTitle");
+const oracleForeignKeyCreateRecovery = ref<TableStructureEditorDraft["oracleForeignKeyCreateRecovery"]>();
+let primaryKeyUnmounted = false;
+const primaryKeyConfirmationScope = `structure-primary-key:${uuid()}`;
+const oracleForeignKeyConfirmationScope = `structure-oracle-foreign-key:${uuid()}`;
+onBeforeUnmount(() => {
+  primaryKeyUnmounted = true;
+  if (primaryKeyBusy.value) productionSafetyStore.cancelScope(primaryKeyConfirmationScope);
+  if (saving.value) productionSafetyStore.cancelScope(oracleForeignKeyConfirmationScope);
+  if (saving.value) productionSafetyStore.cancelScope(oracleConstraintConfirmationScope);
+  if (saving.value) productionSafetyStore.cancelScope(oracleIndexConfirmationScope);
+});
+watch(
+  () => [props.connectionId, props.database, props.schema, props.tableName, props.catalog],
+  () => {
+    invalidateOracleIndexReady();
+    if (primaryKeyBusy.value) productionSafetyStore.cancelScope(primaryKeyConfirmationScope);
+    if (saving.value) productionSafetyStore.cancelScope(oracleForeignKeyConfirmationScope);
+    if (saving.value) productionSafetyStore.cancelScope(oracleConstraintConfirmationScope);
+    if (saving.value) productionSafetyStore.cancelScope(oracleIndexConfirmationScope);
+    existingPrimaryKeyDraft.value = undefined;
+    existingPrimaryKeyPlan.value = undefined;
+    existingPrimaryKeySession.value = undefined;
+    existingOracleForeignKeyPlan.value = undefined;
+    existingOracleForeignKeySession.value = undefined;
+    newOracleForeignKeyPlan.value = undefined;
+    newOracleForeignKeySession.value = undefined;
+    oracleConstraintDraft.value = undefined;
+    oracleConstraintPlan.value = undefined;
+    oracleConstraintSession.value = undefined;
+    oracleIndexPlan.value = undefined;
+    if (primaryKeyBusy.value) saving.value = false;
+  },
+);
+watch(
+  () => [databaseType.value, props.connectionId ? store.connectionStateRevision(props.connectionId) : -1, props.connectionId && store.getConfig(props.connectionId) ? connectionConfigFingerprint(store.getConfig(props.connectionId)!) : ""],
+  () => invalidateOracleIndexReady(),
+);
+const canEditExistingPrimaryKey = computed(() => !isCreateMode.value && (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle"));
+const isOracleConstraintEditor = canEditExistingPrimaryKey;
+const existingPrimaryKeyChanged = computed(() => !!existingPrimaryKeyDraft.value && JSON.stringify(existingPrimaryKeyDraft.value.columns) !== JSON.stringify(existingPrimaryKeyDraft.value.originalColumns));
+const primaryKeyAvailableColumns = computed(() => columns.value.filter((column) => column.original && !column.markedForDrop && !existingPrimaryKeyDraft.value?.columns.includes(column.name)));
+const currentPrimaryKeyIndex = computed(() => {
+  const plan = existingPrimaryKeyPlan.value;
+  if (!plan || JSON.stringify(plan.draft ?? plan.change) !== JSON.stringify(existingPrimaryKeyDraft.value) || JSON.stringify(plan.target) !== JSON.stringify(primaryKeyTarget())) return undefined;
+  return plan.change.oracleIndex;
+});
+
+function primaryKeyTarget(): PrimaryKeyTarget {
+  return { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName, catalog: props.catalog, databaseType: databaseType.value === "oracle" ? "oracle" : "oceanbase-oracle" };
+}
+
+function oracleConstraintTarget(): OracleConstraintTarget {
+  return { ...primaryKeyTarget(), schema: metadataSchema.value, databaseType: databaseType.value === "oracle" ? "oracle" : "oceanbase-oracle" };
+}
+
+function oracleIndexTargetIdentity(target: OracleConstraintTarget): string {
+  return JSON.stringify({ connectionId: target.connectionId, database: target.database, schema: target.schema, tableName: target.tableName, catalog: target.catalog });
+}
+
+function invalidateOracleIndexReady() {
+  oracleIndexEpoch.value += 1;
+  oracleIndexReady.value = undefined;
+}
+
+function oracleIndexLoadIsCurrent(requestId: number, targetIdentity: string, revision: number | undefined, configFingerprint: string) {
+  const connectionId = props.connectionId;
+  const config = connectionId ? store.getConfig(connectionId) : undefined;
+  return (
+    requestId === structureLoadRequestId &&
+    targetIdentity === oracleIndexTargetIdentity(oracleConstraintTarget()) &&
+    (revision === undefined || (store.connectionStateRevision(connectionId!) === revision && store.isCurrentConnectionStateRevision(connectionId!, revision))) &&
+    (revision === undefined || (config ? connectionConfigFingerprint(config) : "") === configFingerprint)
+  );
+}
+
+async function editOracleConstraint(info: ConstraintInfo) {
+  if (!isOracleConstraintEditor.value || saving.value || oracleConstraintBusy.value || existingPrimaryKeyChanged.value || hasPendingStructureChanges(false, false)) return;
+  const target = oracleConstraintTarget();
+  const identity = JSON.stringify(target);
+  try {
+    await loadStructure(true, { columns: false, indexes: true, constraints: true, foreignKeys: false, triggers: false, partitions: false, tableComment: false }, true, { forceMetadata: true, blockSecondaryMetadata: true, preserveDraft: true });
+    if (primaryKeyUnmounted || identity !== JSON.stringify(oracleConstraintTarget())) return;
+    const current = constraints.value.find((item) => item.name === info.name && item.constraint_type === info.constraint_type);
+    if (!current) throw new Error("Constraint metadata changed. Refresh the table definition.");
+    const original = oracleConstraintDefinitionFromInfo(current, target);
+    oracleConstraintDraft.value = { original, target: cloneDraftValue(original), ...(original.kind === "unique" ? { indexPolicy: target.databaseType === "oracle" ? ("keep" as const) : ("none" as const) } : {}) };
+  } catch (error) {
+    if (identity === JSON.stringify(oracleConstraintTarget())) errorMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function deleteOracleConstraint(info: ConstraintInfo) {
+  if (!isOracleConstraintEditor.value || saving.value || oracleConstraintBusy.value || oracleConstraintDraft.value) return;
+  try {
+    const target = oracleConstraintTarget();
+    const original = oracleConstraintDefinitionFromInfo(info, target);
+    oracleConstraintDraft.value = { original, target: null, ...(original.kind === "unique" ? { indexPolicy: target.databaseType === "oracle" ? ("keep" as const) : ("none" as const) } : {}) };
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function addOracleConstraint(kind: "check" | "unique") {
+  if (!isOracleConstraintEditor.value || saving.value || oracleConstraintBusy.value || hasPendingStructureChanges()) return;
+  const prefix = kind === "check" ? "DBX_CHECK_" : "DBX_UNIQUE_";
+  let suffix = 1;
+  while (constraints.value.some((item) => item.name === `${prefix}${suffix}`)) suffix += 1;
+  const name = `${prefix}${suffix}`;
+  const state = { enabled: true, validated: true, deferrable: false, initiallyDeferred: false, rely: false };
+  const definition: OracleConstraintDefinition =
+    kind === "check"
+      ? { kind, definition: { name, expression: "", state } }
+      : {
+          kind,
+          definition: {
+            name,
+            columns: [],
+            state,
+            relyRaw: "NULL",
+            index: {
+              owner: metadataSchema.value,
+              name: "",
+              tableOwner: metadataSchema.value,
+              tableName: props.tableName,
+              sharing: "exclusive",
+              metadataComplete: false,
+              indexType: "NORMAL",
+              uniqueness: "UNIQUE",
+              status: "VALID",
+              partitioned: false,
+              visibility: "VISIBLE",
+              secondary: "N",
+              columns: [],
+              directions: [],
+              keyIsExpression: [],
+              includedColumns: [],
+              newNameAvailable: false,
+            },
+          },
+        };
+  oracleConstraintDraft.value = { original: null, target: definition, ...(kind === "unique" && databaseType.value === "oceanbase-oracle" ? { indexPolicy: "none" as const } : {}) };
+}
+
+function cancelOracleConstraintEdit() {
+  oracleConstraintDraft.value = undefined;
+  oracleConstraintPlan.value = undefined;
+  oracleConstraintSession.value = undefined;
+  oracleIndexPlan.value = undefined;
+  pendingStatements.value = [];
+  warnings.value = [];
+  syncDraftToParent();
+}
+
+function addOracleUniqueColumn(name: string) {
+  const definition = oracleConstraintDraft.value?.target?.kind === "unique" ? oracleConstraintDraft.value.target.definition : undefined;
+  if (definition && name && !definition.columns.includes(name)) definition.columns.push(name);
+}
+
+function canOpenPairedOracleConstraint(index: EditableStructureIndex): boolean {
+  return isOracleConstraintEditor.value && index.isUnique && !!index.original;
+}
+
+async function editOracleUniqueConstraintForIndex(index: EditableStructureIndex) {
+  if (!canOpenPairedOracleConstraint(index)) return;
+  const target = oracleConstraintTarget();
+  const identity = JSON.stringify(target);
+  try {
+    const fresh = await api.listConstraints(target.connectionId, target.database, target.schema, target.tableName, target.catalog);
+    if (primaryKeyUnmounted || identity !== JSON.stringify(oracleConstraintTarget())) return;
+    const constraint = fresh.find((item) => item.constraint_type === "UNIQUE" && item.oracle_metadata?.metadataComplete && item.oracle_metadata.owner === target.schema && item.oracle_metadata.indexOwner === target.schema && item.oracle_metadata.indexName === index.original?.name);
+    if (!constraint) throw new Error("This unique index has no uniquely paired constraint metadata.");
+    activeTab.value = "constraints";
+    await editOracleConstraint(constraint);
+  } catch (error) {
+    if (identity === JSON.stringify(oracleConstraintTarget())) errorMessage.value = error instanceof Error ? error.message : String(error);
+  }
+}
+
+function moveOracleUniqueColumn(index: number, direction: number) {
+  const columns = oracleConstraintDraft.value?.target?.kind === "unique" ? oracleConstraintDraft.value.target.definition.columns : undefined;
+  if (!columns || index + direction < 0 || index + direction >= columns.length) return;
+  const [column] = columns.splice(index, 1);
+  columns.splice(index + direction, 0, column!);
+}
+
+function primaryKeyError(error: unknown): string {
+  return error instanceof OceanbasePrimaryKeyValidationError ? t(`oceanbasePrimaryKey.${error.key}`, error.values) : error instanceof Error ? error.message : String(error);
+}
+
+async function editExistingPrimaryKey(constraint: ConstraintInfo, remove = false) {
+  if (!canEditExistingPrimaryKey.value || saving.value || primaryKeyBusy.value) return;
+  const target = JSON.stringify(primaryKeyTarget());
+  await loadStructure(true, { columns: true, indexes: true, constraints: true, foreignKeys: false, triggers: false, partitions: false, tableComment: false }, true, { blockSecondaryMetadata: true, preserveDraft: true });
+  if (primaryKeyUnmounted || target !== JSON.stringify(primaryKeyTarget())) return;
+  const current = constraints.value.find((item) => item.name === constraint.name && item.constraint_type === "PRIMARY KEY");
+  if (!current || !current.columns.length) {
+    errorMessage.value = t("oceanbasePrimaryKey.incompleteMetadata");
+    return;
+  }
+  existingPrimaryKeyDraft.value = { name: current.name, originalColumns: [...current.columns], columns: remove ? [] : [...current.columns] };
+  if (databaseType.value === "oracle") existingPrimaryKeyDraft.value.oracleIndex = { policy: "keep", owner: metadataSchema.value, name: "" };
+  primaryKeyNewColumn.value = "";
+}
+
+function moveExistingPrimaryKeyColumn(index: number, direction: number) {
+  const draft = existingPrimaryKeyDraft.value;
+  if (!draft || primaryKeyBusy.value || index + direction < 0 || index + direction >= draft.columns.length) return;
+  const [name] = draft.columns.splice(index, 1);
+  draft.columns.splice(index + direction, 0, name!);
+}
+
+function addExistingPrimaryKeyColumn() {
+  if (primaryKeyBusy.value || !primaryKeyAvailableColumns.value.some((column) => column.name === primaryKeyNewColumn.value)) return;
+  existingPrimaryKeyDraft.value?.columns.push(primaryKeyNewColumn.value);
+  primaryKeyNewColumn.value = "";
+}
 // Mirrors Rust `supports_named_primary_key`: engines that persist a user-supplied
 // PK constraint name. Other dialects ignore the symbol, so the field is hidden.
 const canNamePrimaryKey = computed(() => {
@@ -2329,12 +2664,17 @@ function createCurrentDraft(initialized = true): TableStructureEditorDraft {
     mysqlTableEngine: mysqlTableEngine.value,
     originalMysqlTableEngine: originalMysqlTableEngine.value,
     physicalOptions: cloneDraftValue(physicalOptions.value),
+    starrocksPhysicalOptions: cloneDraftValue(starrocksPhysicalOptions.value),
+    starrocksSortColumns: starrocksSortColumns.value ? [...starrocksSortColumns.value] : undefined,
     tableOwner: tableOwner.value,
     originalTableOwner: originalTableOwner.value,
     columns: cloneDraftValue(columns.value),
     indexes: cloneDraftValue(indexes.value),
     foreignKeys: cloneDraftValue(foreignKeys.value),
     constraints: cloneDraftValue(constraints.value),
+    existingPrimaryKey: existingPrimaryKeyDraft.value ? cloneDraftValue(existingPrimaryKeyDraft.value) : undefined,
+    oracleConstraintChange: oracleConstraintDraft.value ? cloneDraftValue(oracleConstraintDraft.value) : undefined,
+    oracleForeignKeyCreateRecovery: oracleForeignKeyCreateRecovery.value ? cloneDraftValue(oracleForeignKeyCreateRecovery.value) : undefined,
     constraintsLoaded: constraintsLoaded.value,
     triggers: cloneDraftValue(triggers.value),
     triggersLoaded: triggersLoaded.value,
@@ -2383,6 +2723,7 @@ function syncDraftToParent() {
 }
 
 function restoreDraft(draft: TableStructureEditorDraft) {
+  invalidateOracleIndexReady();
   lastSyncedDraft = draft;
   restoringDraft = true;
   draftHydrated = false;
@@ -2407,6 +2748,8 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   originalTableOwner.value = draft.originalTableOwner || "";
   columns.value = cloneDraftValue(draft.columns || []);
   physicalOptions.value = restoreTablePhysicalOptions(draft);
+  starrocksPhysicalOptions.value = restoreStarRocksPhysicalOptions(draft.starrocksPhysicalOptions);
+  starrocksSortColumns.value = draft.starrocksSortColumns ? [...draft.starrocksSortColumns] : undefined;
   // Existing-index edits never support Concurrent (the checkbox is disabled and
   // the core builder rejects the request), so a stale `concurrently: true`
   // saved in a restored draft must not be submitted or deadlock the save.
@@ -2426,6 +2769,15 @@ function restoreDraft(draft: TableStructureEditorDraft) {
   normalizeConcurrentIndexDraftsForCurrentAvailability();
   foreignKeys.value = cloneDraftValue(draft.foreignKeys || []);
   constraints.value = cloneDraftValue(draft.constraints || []);
+  existingPrimaryKeyDraft.value = draft.existingPrimaryKey ? cloneDraftValue(draft.existingPrimaryKey) : undefined;
+  oracleConstraintDraft.value = draft.oracleConstraintChange ? cloneDraftValue(draft.oracleConstraintChange) : undefined;
+  oracleForeignKeyCreateRecovery.value = draft.oracleForeignKeyCreateRecovery ? cloneDraftValue(draft.oracleForeignKeyCreateRecovery) : undefined;
+  if (oracleForeignKeyCreateRecovery.value) {
+    primaryKeyResultTitle.value = "oracleForeignKey.resultTitle";
+    primaryKeyResultMessage.value = `${metadataSchema.value}.${oracleForeignKeyCreateRecovery.value.tableName}: ${t("oracleForeignKey.createdTablePartial")}`;
+    primaryKeyResultDetails.value = oracleForeignKeyCreateRecovery.value.details;
+    primaryKeyResultOpen.value = true;
+  }
   // Drafts created before constraint loading existed have no saved facet.
   constraintsLoaded.value = draft.constraintsLoaded ?? false;
   triggers.value = cloneDraftValue(draft.triggers || []);
@@ -2501,13 +2853,16 @@ function markDraftHydratedAndSync() {
   syncDraftToParent();
 }
 
-function hasPendingStructureChanges(): boolean {
+function hasPendingStructureChanges(includeExistingPrimaryKey = true, includeOracleConstraint = true): boolean {
+  if (includeExistingPrimaryKey && existingPrimaryKeyChanged.value) return true;
+  if (includeOracleConstraint && oracleConstraintChanged.value) return true;
   if (isCreateMode.value) {
     return (
       !!newTableName.value.trim() ||
       !!tableComment.value.trim() ||
       mysqlTableEngine.value !== originalMysqlTableEngine.value ||
       hasTablePhysicalOptions(physicalOptions.value) ||
+      (databaseType.value === "starrocks" && hasStarRocksPhysicalOptions(starrocksPhysicalOptions.value)) ||
       columns.value.length > 0 ||
       indexes.value.length > 0 ||
       foreignKeys.value.length > 0 ||
@@ -2542,6 +2897,14 @@ function clearSqlPreviewState() {
   pendingStatements.value = [];
   warnings.value = [];
   sqliteSchemaRevision.value = undefined;
+  existingPrimaryKeyPlan.value = undefined;
+  existingPrimaryKeySession.value = undefined;
+  existingOracleForeignKeyPlan.value = undefined;
+  existingOracleForeignKeySession.value = undefined;
+  newOracleForeignKeyPlan.value = undefined;
+  newOracleForeignKeySession.value = undefined;
+  oracleConstraintPlan.value = undefined;
+  oracleConstraintSession.value = undefined;
 }
 
 function dataTypeOptionsCacheKey(connectionId: string, database: string) {
@@ -2638,7 +3001,10 @@ function scheduleSqlPreviewRefresh() {
   }
   sqlPreviewRequestId++;
   deferredSqlPreviewRefresh = false;
-  if (!hasPendingStructureChanges() && !ddlDirty.value) {
+  // Existing StarRocks tables need their model metadata before definition
+  // controls can be enabled, even when no column has been edited yet.
+  const needsStarRocksAlterContext = !isCreateMode.value && databaseType.value === "starrocks" && !starrocksAlterContext.value;
+  if (!hasPendingStructureChanges() && !ddlDirty.value && !needsStarRocksAlterContext) {
     pendingStatements.value = [];
     warnings.value = [];
     sqliteSchemaRevision.value = undefined;
@@ -2704,6 +3070,8 @@ function structureChangeOptions(): BuildTableStructureChangeSqlOptions {
     foreignTable: isForeignTable.value,
     isGaussdbMMode: connection.value?.driver_profile?.toLowerCase() === "gaussdb-m",
     primaryKeyName: willCreateNewPrimaryKey.value ? primaryKeyName.value.trim() || undefined : undefined,
+    primaryKeyChange: existingPrimaryKeyChanged.value ? cloneDraftValue(existingPrimaryKeyDraft.value) : undefined,
+    oracleConstraintChanges: oracleConstraintChanged.value && oracleConstraintDraft.value ? [cloneDraftValue(oracleConstraintDraft.value)] : undefined,
   };
 }
 
@@ -2723,6 +3091,14 @@ function partitionSqlOptions(): TablePartitionSqlOptions {
 
 async function refreshSqlPreview() {
   const requestId = ++sqlPreviewRequestId;
+  existingPrimaryKeyPlan.value = undefined;
+  existingPrimaryKeySession.value = undefined;
+  oracleConstraintPlan.value = undefined;
+  oracleConstraintSession.value = undefined;
+  existingOracleForeignKeyPlan.value = undefined;
+  existingOracleForeignKeySession.value = undefined;
+  newOracleForeignKeyPlan.value = undefined;
+  newOracleForeignKeySession.value = undefined;
   if (concurrentAvailabilityInvalidated.value) {
     // Availability gap in effect: never regenerate SQL here — doing so would
     // turn a lost Concurrent request into a silent blocking CREATE INDEX. Keep
@@ -2746,12 +3122,163 @@ async function refreshSqlPreview() {
     sqlPreviewPending.value = false;
     return;
   }
+  if (!isCreateMode.value && databaseType.value === "starrocks") {
+    try {
+      const { ddl } = await loadObjectDdl(ddlRequest());
+      starrocksAlterContext.value = starRocksAlterOptionsFromDdl(ddl, connection.value?.database_info?.productVersion);
+      if (!starrocksSortColumns.value) starrocksSortColumns.value = [...(starrocksAlterContext.value.sortColumns ?? [])];
+    } catch {
+      starrocksAlterContext.value = starRocksAlterOptionsFromDdl("", connection.value?.database_info?.productVersion);
+    }
+  }
+  if (requestId !== sqlPreviewRequestId) return;
   if (!hasPendingStructureChanges()) {
     pendingStatements.value = [];
     warnings.value = [];
     sqliteSchemaRevision.value = undefined;
     sqlPreviewLoading.value = false;
     sqlPreviewPending.value = false;
+    return;
+  }
+  if (existingPrimaryKeyChanged.value) {
+    sqlPreviewLoading.value = true;
+    try {
+      if (!canEditExistingPrimaryKey.value || hasPendingStructureChanges(false)) throw new OceanbasePrimaryKeyValidationError("mixedDraft");
+      const target = primaryKeyTarget();
+      const connectionRevision = store.connectionStateRevision(target.connectionId);
+      const currentConfig = store.getConfig(target.connectionId);
+      const configFingerprint = currentConfig ? connectionConfigFingerprint(currentConfig) : "";
+      let change = cloneDraftValue(existingPrimaryKeyDraft.value!);
+      const draft = cloneDraftValue(change);
+      let snapshot: string;
+      if (target.databaseType === "oracle") {
+        const prepared = await prepareOraclePrimaryKeyChange(target, change);
+        change = prepared.change;
+        snapshot = prepared.snapshot;
+      } else {
+        snapshot = await readOceanbasePrimaryKeySnapshot(target, change);
+      }
+      if (requestId !== sqlPreviewRequestId) return;
+      const result = await api.buildTableStructureChangeSql({ ...structureChangeOptions(), primaryKeyChange: change });
+      if (requestId !== sqlPreviewRequestId) return;
+      const latestConfig = store.getConfig(target.connectionId);
+      if (store.connectionStateRevision(target.connectionId) !== connectionRevision || !store.isCurrentConnectionStateRevision(target.connectionId, connectionRevision) || (latestConfig ? connectionConfigFingerprint(latestConfig) : "") !== configFingerprint) {
+        throw new Error(t("oceanbasePrimaryKey.refreshRequired"));
+      }
+      if (result.warnings.length) throw new Error(result.warnings.join("\n"));
+      if (result.statements.length !== (change.columns.length ? 2 : 1)) throw new OceanbasePrimaryKeyValidationError("incompletePlan");
+      existingPrimaryKeyPlan.value = { target, change, draft, snapshot, statements: [...result.statements] };
+      existingPrimaryKeySession.value = { revision: connectionRevision, configFingerprint };
+      pendingStatements.value = [...result.statements];
+      warnings.value = [];
+    } catch (error) {
+      if (requestId !== sqlPreviewRequestId) return;
+      pendingStatements.value = [];
+      warnings.value = [primaryKeyError(error)];
+    } finally {
+      if (requestId === sqlPreviewRequestId) {
+        sqlPreviewLoading.value = false;
+        sqlPreviewPending.value = false;
+      }
+    }
+    return;
+  }
+  if (oracleConstraintChanged.value && oracleConstraintDraft.value) {
+    sqlPreviewLoading.value = true;
+    const target = primaryKeyTarget() as OracleConstraintTarget;
+    const revision = store.connectionStateRevision(target.connectionId);
+    const config = store.getConfig(target.connectionId);
+    const fingerprint = config ? connectionConfigFingerprint(config) : "";
+    const connectionCurrent = () => {
+      const currentConfig = store.getConfig(target.connectionId);
+      return store.connectionStateRevision(target.connectionId) === revision && store.isCurrentConnectionStateRevision(target.connectionId, revision) && (currentConfig ? connectionConfigFingerprint(currentConfig) : "") === fingerprint;
+    };
+    const draftFingerprint = JSON.stringify(oracleConstraintDraft.value);
+    try {
+      if (!isOracleConstraintEditor.value || isCreateMode.value || existingPrimaryKeyChanged.value || hasPendingStructureChanges(false, false)) throw new Error("Apply CHECK/UNIQUE changes separately from other table structure drafts.");
+      const plan = await prepareOracleConstraintPlan(target, structureChangeOptions(), cloneDraftValue(oracleConstraintDraft.value), connectionCurrent);
+      if (requestId !== sqlPreviewRequestId || JSON.stringify(target) !== JSON.stringify(primaryKeyTarget()) || draftFingerprint !== JSON.stringify(oracleConstraintDraft.value)) return;
+      const currentConfig = store.getConfig(target.connectionId);
+      if (store.connectionStateRevision(target.connectionId) !== revision || (currentConfig ? connectionConfigFingerprint(currentConfig) : "") !== fingerprint) throw new Error("Connection changed while preparing the constraint plan. Refresh and preview again.");
+      oracleConstraintPlan.value = plan;
+      oracleConstraintSession.value = { revision, configFingerprint: fingerprint, draftFingerprint };
+      pendingStatements.value = [...plan.statements];
+      warnings.value = [];
+    } catch (error) {
+      if (requestId !== sqlPreviewRequestId) return;
+      pendingStatements.value = [];
+      warnings.value = [error instanceof Error ? error.message : String(error)];
+    } finally {
+      if (requestId === sqlPreviewRequestId) {
+        sqlPreviewLoading.value = false;
+        sqlPreviewPending.value = false;
+      }
+    }
+    return;
+  }
+  const foreignKeyChanges = isOracleForeignKeyEditor.value ? oracleForeignKeyChanges() : [];
+  if (isCreateMode.value && foreignKeyChanges.length) {
+    sqlPreviewLoading.value = true;
+    const target = { ...primaryKeyTarget(), schema: metadataSchema.value, tableName: newTableName.value.trim(), databaseType: databaseType.value === "oracle" ? ("oracle" as const) : ("oceanbase-oracle" as const) };
+    const connectionRevision = store.connectionStateRevision(target.connectionId);
+    const connectionConfig = store.getConfig(target.connectionId);
+    const configFingerprint = connectionConfig ? connectionConfigFingerprint(connectionConfig) : "";
+    const connectionCurrent = () => {
+      const currentConfig = store.getConfig(target.connectionId);
+      return store.connectionStateRevision(target.connectionId) === connectionRevision && store.isCurrentConnectionStateRevision(target.connectionId, connectionRevision) && (currentConfig ? connectionConfigFingerprint(currentConfig) : "") === configFingerprint;
+    };
+    try {
+      const options = { ...structureChangeOptions(), oracleForeignKeyChanges: foreignKeyChanges };
+      const partitioning = createPartitioningEnabled.value ? { kind: createPartitioningKind.value, columns: createPartitioningColumns.value, expression: createPartitioningExpression.value } : undefined;
+      const plan = await prepareOracleForeignKeyCreatePlan(target, options, foreignKeyChanges, partitioning, connectionCurrent);
+      if (requestId !== sqlPreviewRequestId || JSON.stringify(target) !== JSON.stringify({ ...primaryKeyTarget(), schema: metadataSchema.value, tableName: newTableName.value.trim(), databaseType: target.databaseType })) return;
+      const currentConfig = store.getConfig(target.connectionId);
+      if (store.connectionStateRevision(target.connectionId) !== connectionRevision || (currentConfig ? connectionConfigFingerprint(currentConfig) : "") !== configFingerprint) throw new Error(t("oracleForeignKey.refreshRequired"));
+      newOracleForeignKeyPlan.value = plan;
+      newOracleForeignKeySession.value = { revision: connectionRevision, configFingerprint, draftFingerprint: JSON.stringify({ options: plan.options, changes: plan.changes, partitioning: plan.partitioning }) };
+      pendingStatements.value = [...plan.statements];
+      warnings.value = [];
+    } catch (error) {
+      if (requestId !== sqlPreviewRequestId) return;
+      pendingStatements.value = [];
+      warnings.value = [error instanceof Error ? error.message : String(error)];
+    } finally {
+      if (requestId === sqlPreviewRequestId) {
+        sqlPreviewLoading.value = false;
+        sqlPreviewPending.value = false;
+      }
+    }
+    return;
+  }
+  if (foreignKeyChanges.length) {
+    sqlPreviewLoading.value = true;
+    const target = { ...primaryKeyTarget(), schema: metadataSchema.value, tableName: props.tableName || "", databaseType: databaseType.value === "oracle" ? ("oracle" as const) : ("oceanbase-oracle" as const) };
+    const connectionRevision = store.connectionStateRevision(target.connectionId);
+    const connectionConfig = store.getConfig(target.connectionId);
+    const configFingerprint = connectionConfig ? connectionConfigFingerprint(connectionConfig) : "";
+    const connectionCurrent = () => {
+      const currentConfig = store.getConfig(target.connectionId);
+      return store.connectionStateRevision(target.connectionId) === connectionRevision && store.isCurrentConnectionStateRevision(target.connectionId, connectionRevision) && (currentConfig ? connectionConfigFingerprint(currentConfig) : "") === configFingerprint;
+    };
+    try {
+      const plan = await prepareOracleForeignKeyPlan(target, structureChangeOptions(), foreignKeyChanges, connectionCurrent);
+      if (requestId !== sqlPreviewRequestId || JSON.stringify(target) !== JSON.stringify(primaryKeyTarget())) return;
+      const currentConfig = store.getConfig(target.connectionId);
+      if (store.connectionStateRevision(target.connectionId) !== connectionRevision || (currentConfig ? connectionConfigFingerprint(currentConfig) : "") !== configFingerprint) throw new Error(t("oracleForeignKey.refreshRequired"));
+      existingOracleForeignKeyPlan.value = plan;
+      existingOracleForeignKeySession.value = { revision: connectionRevision, configFingerprint };
+      pendingStatements.value = [...plan.statements];
+      warnings.value = [];
+    } catch (error) {
+      if (requestId !== sqlPreviewRequestId) return;
+      pendingStatements.value = [];
+      warnings.value = [error instanceof Error ? error.message : String(error)];
+    } finally {
+      if (requestId === sqlPreviewRequestId) {
+        sqlPreviewLoading.value = false;
+        sqlPreviewPending.value = false;
+      }
+    }
     return;
   }
   const indexWarnings = indexes.value
@@ -2764,6 +3291,13 @@ async function refreshSqlPreview() {
     pendingStatements.value = [];
     warnings.value = indexWarnings;
     sqliteSchemaRevision.value = undefined;
+    sqlPreviewLoading.value = false;
+    sqlPreviewPending.value = false;
+    return;
+  }
+  if (pendingStarRocksSort.value && (columns.value.some(columnChanged) || tableComment.value !== originalTableComment.value || indexes.value.some(indexChanged) || foreignKeys.value.some(foreignKeyChanged) || triggers.value.some(triggerChanged))) {
+    pendingStatements.value = [];
+    warnings.value = [t("starrocksLayout.sortSaveSeparately")];
     sqlPreviewLoading.value = false;
     sqlPreviewPending.value = false;
     return;
@@ -2788,10 +3322,12 @@ async function refreshSqlPreview() {
       isCreateMode.value
         ? createPartitioningEnabled.value
           ? api.buildCreatePartitionedTableSql({ options, partitioning: { kind: createPartitioningKind.value, columns: createPartitioningColumns.value, expression: createPartitioningExpression.value } })
-          : api.buildCreateTableSql(options)
+          : api.buildCreateTableSql(options, connection.value?.database_info?.productVersion, databaseType.value === "starrocks" ? buildStarRocksDialectOptions(starrocksPhysicalOptions.value) : undefined)
         : hasSqliteTypeChange.value
           ? api.previewSqliteTableStructureChange(props.connectionId, props.database, options)
-          : api.buildTableStructureChangeSql(options),
+          : databaseType.value === "starrocks"
+            ? api.buildTableStructureChangeSql(options, { ...starrocksAlterContext.value!, reorderColumns: false, positionColumnOrder: structureCapabilities.value.reorderColumn, sortColumnNames: pendingStarRocksSort.value })
+            : api.buildTableStructureChangeSql(options),
       supportsTableOwner.value
         ? api.buildTableOwnerChangeSql({
             databaseType: databaseType.value,
@@ -2836,6 +3372,10 @@ const canApply = computed(
   () =>
     !loading.value &&
     !saving.value &&
+    !primaryKeyBusy.value &&
+    !oracleForeignKeyBusy.value &&
+    !oracleConstraintBusy.value &&
+    (databaseType.value !== "starrocks" || !starrocksStatusBusy.value) &&
     !postSaveRefreshing.value &&
     !secondaryMetadataLoading.value &&
     !mysqlTableEngineLoading.value &&
@@ -2844,6 +3384,7 @@ const canApply = computed(
     pendingStatements.value.length > 0 &&
     warnings.value.length === 0 &&
     !concurrentAvailabilityInvalidated.value &&
+    !(isCreateMode.value && oracleForeignKeyCreateRecovery.value?.uncertainSteps.includes("CREATE")) &&
     (!hasSqliteTypeChange.value || !!sqliteSchemaRevision.value) &&
     !!props.connectionId &&
     (isCreateMode.value ? !!newTableName.value.trim() : !!props.tableName),
@@ -2855,6 +3396,7 @@ function clearDraft() {
 }
 
 function resetState() {
+  invalidateOracleIndexReady();
   loading.value = false;
   saving.value = false;
   postSaveRefreshing.value = false;
@@ -2881,6 +3423,17 @@ function resetState() {
   sqliteSchemaRevision.value = undefined;
   foreignKeys.value = [];
   constraints.value = [];
+  existingPrimaryKeyDraft.value = undefined;
+  existingPrimaryKeyPlan.value = undefined;
+  existingPrimaryKeySession.value = undefined;
+  existingOracleForeignKeyPlan.value = undefined;
+  existingOracleForeignKeySession.value = undefined;
+  newOracleForeignKeyPlan.value = undefined;
+  newOracleForeignKeySession.value = undefined;
+  oracleConstraintDraft.value = undefined;
+  oracleConstraintPlan.value = undefined;
+  oracleConstraintSession.value = undefined;
+  primaryKeyNewColumn.value = "";
   constraintsLoaded.value = false;
   partitioning.value = null;
   triggers.value = [];
@@ -2906,6 +3459,9 @@ function resetState() {
   mysqlTableEngine.value = "";
   originalMysqlTableEngine.value = "";
   physicalOptions.value = emptyTablePhysicalOptions();
+  starrocksPhysicalOptions.value = emptyStarRocksPhysicalOptions();
+  starrocksAlterContext.value = undefined;
+  starrocksSortColumns.value = undefined;
   mysqlTableEngineOptions.value = [];
   mysqlTableEngineLoadRequestId += 1;
   mysqlTableEngineLoading.value = false;
@@ -2946,7 +3502,10 @@ async function reloadStructureFromDatabase() {
   // Refreshing from the database discards every other draft; pending partition
   // operations must not survive it and still be applied on save.
   partitionOperations.value = [];
+  starrocksAlterContext.value = undefined;
+  starrocksSortColumns.value = undefined;
   const refreshDdl = activeTab.value === "ddl";
+  const preserveOracleIndexDraft = oracleIndexRefreshGuard.value?.target === oracleIndexTargetIdentity(oracleConstraintTarget());
   const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
   invalidateTableMetadataCache(metadataMatch);
   await invalidateObjectDdl(ddlRequest());
@@ -2959,7 +3518,11 @@ async function reloadStructureFromDatabase() {
     await Promise.all([fetchDdl(true), loadVisibleTableComment(true), loadTableOwner(true), loadTableOwnerRoles(), loadMysqlTableEngine(true)]);
     markDraftHydratedAndSync();
   } else {
-    await Promise.all([loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true, forceDdl: true, forceMetadata: true }), loadTableOwner(true), loadTableOwnerRoles(), loadMysqlTableEngine(true)]);
+    await Promise.all([loadStructure(false, visibleTableStructureRefreshScope(activeTab.value), true, { blockSecondaryMetadata: true, forceDdl: true, forceMetadata: true, preserveDraft: preserveOracleIndexDraft }), loadTableOwner(true), loadTableOwnerRoles(), loadMysqlTableEngine(true)]);
+    if (preserveOracleIndexDraft) {
+      markDraftHydratedAndSync();
+      await refreshSqlPreview();
+    }
   }
 }
 
@@ -3160,8 +3723,15 @@ async function loadStructure(
   const schema = metadataSchema.value;
   const tableName = props.tableName;
   if (!connectionId || !database || !tableName) return;
-  const effectiveScope = withRequiredPostgresPrimaryKeyMetadata(scope);
+  const oracleIndexContext = !isCreateMode.value && (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
+  const needsOracleIndexBaseline = oracleIndexContext && scope.indexes;
+  const effectiveScope = withRequiredPostgresPrimaryKeyMetadata(needsOracleIndexBaseline ? { ...scope, columns: true, indexes: true } : scope);
+  if (oracleIndexContext && (scope.columns || scope.indexes)) invalidateOracleIndexReady();
+  let loadEpoch = oracleIndexEpoch.value;
   const requestId = ++structureLoadRequestId;
+  const loadTargetIdentity = oracleIndexTargetIdentity(oracleConstraintTarget());
+  let loadConnectionRevision: number | undefined;
+  let loadConfigFingerprint = "";
   if (!silent) loading.value = true;
   setSecondaryMetadataLoading(effectiveScope, true);
   errorMessage.value = "";
@@ -3174,9 +3744,14 @@ async function loadStructure(
   let appliedColumnsSignature: string | undefined;
   try {
     await store.ensureConnected(connectionId);
+    loadConnectionRevision = store.connectionStateRevision(connectionId);
+    const loadConnection = store.getConfig(connectionId);
+    loadConfigFingerprint = loadConnection ? connectionConfigFingerprint(loadConnection) : "";
+    loadEpoch = oracleIndexEpoch.value;
+    if (requestId !== structureLoadRequestId || loadTargetIdentity !== oracleIndexTargetIdentity(oracleConstraintTarget())) return;
 
     const metadataRequest = ddlRequest();
-    const forceMetadata = options.forceMetadata === true;
+    const forceMetadata = options.forceMetadata === true || needsOracleIndexBaseline;
     const partitionStatusPromise =
       tableMetadataCapabilities.value.partitions && !isCreateMode.value
         ? api
@@ -3228,8 +3803,10 @@ async function loadStructure(
           return result.value;
         })
       : Promise.resolve(undefined);
+    const secondaryMetadataResultsPromise = Promise.allSettled([indexesPromise, foreignKeysPromise, constraintsPromise, triggersPromise, partitioningPromise]);
 
     let nextColumns = await columnsPromise;
+    if (!oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) return;
     if (nextColumns) {
       if (databaseType.value === "manticoresearch" && tableMetadataCapabilities.value.ddl) {
         try {
@@ -3241,13 +3818,17 @@ async function loadStructure(
           /* ignore — Manticore column properties can still come from SHOW COLUMNS when available */
         }
       }
+      if (!oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) return;
       // Load live charset/collation metadata from the MySQL server so the column
       // editor shows the correct options for the server version.
       void loadCharsetMetadata();
       void loadMysqlTableDefaultCollation();
-      const nextColumnDrafts = createColumnDrafts(nextColumns, databaseType.value);
-      const hydratedColumnDrafts = supportsCharacterLengthUnits.value && options.characterLengthUnitsAfterSave ? restoreCharacterLengthUnitsAfterSave(databaseType.value, nextColumnDrafts, options.characterLengthUnitsAfterSave) : nextColumnDrafts;
-      columns.value = applyStoredLocalColumnOrder(hydratedColumnDrafts);
+      const retainOracleColumns = oracleIndexContext && options.preserveDraft === true && !scope.columns;
+      if (!retainOracleColumns) {
+        const nextColumnDrafts = createColumnDrafts(nextColumns, databaseType.value);
+        const hydratedColumnDrafts = supportsCharacterLengthUnits.value && options.characterLengthUnitsAfterSave ? restoreCharacterLengthUnitsAfterSave(databaseType.value, nextColumnDrafts, options.characterLengthUnitsAfterSave) : nextColumnDrafts;
+        columns.value = applyStoredLocalColumnOrder(hydratedColumnDrafts);
+      }
       appliedColumnsSignature = JSON.stringify(nextColumns);
       loadedMetadataFacets.add("columns");
       if (!options.preserveDraft) clearColumnSelection();
@@ -3280,8 +3861,8 @@ async function loadStructure(
       }
     }
     const applySecondaryMetadata = async () => {
-      const [indexesResult, foreignKeysResult, constraintsResult, triggersResult, partitioningResult] = await Promise.allSettled([indexesPromise, foreignKeysPromise, constraintsPromise, triggersPromise, partitioningPromise]);
-      if (requestId !== structureLoadRequestId) return;
+      const [indexesResult, foreignKeysResult, constraintsResult, triggersResult, partitioningResult] = await secondaryMetadataResultsPromise;
+      if (!oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) return;
 
       type SecondaryMetadataResult = { facet: ObjectMetadataFacet; result: PromiseSettledResult<unknown> };
       const secondaryResults: SecondaryMetadataResult[] = [
@@ -3306,11 +3887,39 @@ async function loadStructure(
       const nextTriggers = triggersResult.status === "fulfilled" ? triggersResult.value : undefined;
       if (nextIndexes) {
         // An empty lazy load changes no draft data and should not trigger another save.
-        if (nextIndexes.length || indexes.value.length) indexes.value = createIndexDrafts(nextIndexes);
+        const indexRefreshGuard = oracleIndexRefreshGuard.value;
+        if (options.preserveDraft && indexRefreshGuard?.target === JSON.stringify({ connectionId, database, schema, tableName, catalog })) {
+          indexes.value = mergeOracleIndexDraftsAfterRefresh(indexes.value, nextIndexes, indexRefreshGuard.completedCreates);
+        } else if (nextIndexes.length || indexes.value.length) {
+          indexes.value = createIndexDrafts(nextIndexes);
+        }
+        if (oracleIndexRefreshGuard.value?.target === JSON.stringify({ connectionId, database, schema, tableName, catalog }) && requestId > oracleIndexRefreshGuard.value.afterRequestId) {
+          oracleIndexRefreshGuard.value = undefined;
+        }
         loadedMetadataFacets.add("indexes");
       }
       if (nextForeignKeys) {
-        foreignKeys.value = createForeignKeyDrafts(nextForeignKeys);
+        foreignKeys.value = createForeignKeyDrafts(nextForeignKeys, databaseType.value);
+        const recovery = oracleForeignKeyCreateRecovery.value;
+        if (recovery?.tableExists && (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle")) {
+          const pending = recovery.remaining
+            .filter((definition) => !foreignKeys.value.some((foreignKey) => foreignKey.name === definition.name))
+            .map((definition) => ({
+              id: `oracle-create-recovery:${definition.name}`,
+              name: definition.name,
+              column: definition.columns[0] || "",
+              refSchema: definition.refSchema,
+              refTable: definition.refTable,
+              refColumn: definition.refColumns[0] || "",
+              columns: [...definition.columns],
+              refColumns: [...definition.refColumns],
+              oracleState: { ...definition.state },
+              onUpdate: "NO ACTION",
+              onDelete: definition.onDelete,
+              markedForDrop: false,
+            }));
+          foreignKeys.value.push(...pending);
+        }
         loadedMetadataFacets.add("foreign-keys");
       }
       if (nextConstraints) {
@@ -3342,10 +3951,35 @@ async function loadStructure(
         console.warn("[DBX][structure-editor:secondary-metadata-failed]", error);
       })
       .finally(() => {
-        if (requestId === structureLoadRequestId) setSecondaryMetadataLoading(effectiveScope, false);
+        if (oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) setSecondaryMetadataLoading(effectiveScope, false);
       });
-    if (options.blockSecondaryMetadata) {
+    if (options.blockSecondaryMetadata || needsOracleIndexBaseline) {
       await secondaryMetadataPromise;
+    }
+    if (needsOracleIndexBaseline && !secondaryMetadataErrors.value.indexes && oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint) && oracleIndexEpoch.value === loadEpoch) {
+      try {
+        const target = oracleConstraintTarget();
+        const snapshot = await readOracleIndexSnapshot(target);
+        if (oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint) && oracleIndexEpoch.value === loadEpoch) {
+          const loadedColumns = columns.value.flatMap((column) => (column.original ? [column.original] : []));
+          if (oracleIndexSnapshotMatchesLoaded(snapshot, target, indexes.value) && oracleIndexSnapshotMatchesLoadedColumns(snapshot, loadedColumns)) {
+            oracleIndexReady.value = {
+              snapshot,
+              epoch: loadEpoch,
+              targetIdentity: loadTargetIdentity,
+              requestId,
+              connectionRevision: loadConnectionRevision!,
+              configFingerprint: loadConfigFingerprint,
+              columnsFingerprint: JSON.stringify(columns.value),
+              indexesFingerprint: JSON.stringify(snapshot.indexes),
+            };
+          }
+        }
+      } catch (error) {
+        if (oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) {
+          secondaryMetadataErrors.value.indexes = error instanceof Error ? error.message : String(error);
+        }
+      }
     }
     loadedSuccessfully = true;
     // Cache-served structure metadata can be stale when another session rebuilt
@@ -3357,17 +3991,20 @@ async function loadStructure(
       void revalidateCachedStructureMetadata(requestId, { columns: columnsServedFromCache, tableComment: commentServedFromCache }, appliedColumnsSignature);
     }
   } catch (e: any) {
-    if (showErrors) {
-      errorMessage.value = e?.message || String(e);
-    } else {
-      console.warn("[DBX][structure-editor:refresh-failed]", e);
+    if (oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) {
+      if (showErrors) {
+        errorMessage.value = e?.message || String(e);
+      } else {
+        console.warn("[DBX][structure-editor:refresh-failed]", e);
+      }
     }
+    return { error: e?.message || String(e) };
   } finally {
     if (!secondaryMetadataScheduled && requestId === structureLoadRequestId) {
       setSecondaryMetadataLoading(effectiveScope, false);
     }
-    if (!silent) loading.value = false;
-    if (!options.preserveDraft && loadedSuccessfully && requestId === structureLoadRequestId) {
+    if (!silent && requestId === structureLoadRequestId) loading.value = false;
+    if (!options.preserveDraft && loadedSuccessfully && oracleIndexLoadIsCurrent(requestId, loadTargetIdentity, loadConnectionRevision, loadConfigFingerprint)) {
       markDraftHydratedAndSync();
     }
   }
@@ -3384,22 +4021,41 @@ async function revalidateCachedStructureMetadata(loadRequestId: number, scope: {
   const schema = metadataSchema.value;
   const tableName = props.tableName;
   if (!connectionId || !database || !tableName) return;
+  if (scope.columns && (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle")) invalidateOracleIndexReady();
   const revalidationId = ++structureMetadataRevalidationId;
   const metadataRequest = { connectionId, database, schema, tableName, catalog, queryTimeoutSecs: store.getConfig(connectionId)?.query_timeout_secs };
+  let revalidationConnectionRevision: number | undefined;
+  let revalidationConfigFingerprint = "";
+  const isCurrent = () =>
+    revalidationId === structureMetadataRevalidationId &&
+    loadRequestId === structureLoadRequestId &&
+    connectionId === props.connectionId &&
+    database === props.database &&
+    schema === metadataSchema.value &&
+    tableName === props.tableName &&
+    (catalog || "") === (props.catalog || "") &&
+    (revalidationConnectionRevision === undefined ||
+      (store.connectionStateRevision(connectionId) === revalidationConnectionRevision &&
+        store.isCurrentConnectionStateRevision(connectionId, revalidationConnectionRevision) &&
+        (store.getConfig(connectionId) ? connectionConfigFingerprint(store.getConfig(connectionId)!) : "") === revalidationConfigFingerprint));
   try {
     await store.ensureConnected(connectionId);
+    revalidationConnectionRevision = store.connectionStateRevision(connectionId);
+    const revalidationConfig = store.getConfig(connectionId);
+    revalidationConfigFingerprint = revalidationConfig ? connectionConfigFingerprint(revalidationConfig) : "";
     // Force alone only clears this facet's own key; the web backend keeps its
     // own backend-columns/backend-comment entries under the same table prefix
     // and would serve them to the forced re-fetch. Drop the whole table scope
     // first, the same thing an explicit "Refresh Structure" does.
     await invalidateObjectMetadataCache({ connectionId, database, schema, tableName });
+    if (!isCurrent()) return;
     const columnsPromise = scope.columns ? loadObjectMetadataFacet(metadataRequest, "columns", () => api.getColumns(connectionId, database, schema, tableName, catalog), { force: true }) : Promise.resolve(undefined);
     const commentPromise = scope.tableComment ? loadCachedTableComment(metadataRequest, true) : Promise.resolve(undefined);
     // allSettled so a failing comment re-fetch cannot swallow a valid columns
     // fix (and vice versa); each failure is logged on its own.
     const [columnsResult, commentResult] = await Promise.allSettled([columnsPromise, commentPromise] as const);
     // A newer load or revalidation supersedes this one.
-    if (revalidationId !== structureMetadataRevalidationId || loadRequestId !== structureLoadRequestId) return;
+    if (!isCurrent()) return;
     if (columnsResult.status === "rejected") console.warn("[DBX][structure-editor:columns-metadata-revalidation-failed]", columnsResult.reason);
     if (commentResult.status === "rejected") console.warn("[DBX][structure-editor:comment-metadata-revalidation-failed]", commentResult.reason);
 
@@ -3418,7 +4074,7 @@ async function revalidateCachedStructureMetadata(loadRequestId: number, scope: {
     }
     if (applied) syncDraftToParent();
   } catch (e) {
-    console.warn("[DBX][structure-editor:metadata-revalidation-failed]", e);
+    if (isCurrent()) console.warn("[DBX][structure-editor:metadata-revalidation-failed]", e);
   }
 }
 
@@ -3552,6 +4208,97 @@ function onColumnRowActivate(column: EditableStructureColumn) {
   selectSingleColumn(column);
 }
 
+const copySourceConnection = computed(() => store.getConfig(copySourceConnectionId.value));
+function isCompatibleCopyConnection(config: ConnectionConfig): boolean {
+  const sourceType = tableStructureDatabaseTypeForConnection(config);
+  // Unknown JDBC dialects cannot be assumed compatible across connections.
+  return config.id === props.connectionId || (!!sourceType && sourceType !== "jdbc" && sourceType === databaseType.value);
+}
+const copySourceConnections = computed(() => store.connections.filter(isCompatibleCopyConnection));
+const copySourceCompatible = computed(() => !!copySourceConnection.value && isCompatibleCopyConnection(copySourceConnection.value));
+const copySourceRootSchemaMode = computed(() => namespaceOptionsAreSchemas(copySourceConnection.value));
+const copySourceHasSchema = computed(() => !copySourceRootSchemaMode.value && !connectionUsesDatabaseObjectTreeMode(copySourceConnection.value) && isSchemaAware(tableStructureDatabaseTypeForConnection(copySourceConnection.value)));
+const copySourceMetadataSchema = computed(() => connectionObjectTreeQuerySchema(copySourceConnection.value, copySourceDatabase.value, copySourceSchema.value));
+const copySourceTargetCatalog = computed(() => normalizedQueryTabCatalog(copySourceCatalogs.value, copySourceCatalog.value));
+
+function resetCopySourceTables() {
+  clearCopySourceTableSearchTimer();
+  ++copySourceTablesRequestId;
+  copySourceTablesLoading.value = false;
+  copySourceTables.value = [];
+  copySourceTablesOffset.value = 0;
+  copySourceTablesHasMore.value = false;
+  clearCopySourceTableSelection();
+}
+
+// Explicit cascade steps keep stale namespace requests from restoring old selections.
+async function changeCopySourceScope(level: "connection" | "catalog" | "database" | "schema", value: string, prefill = false) {
+  const requestId = ++copySourceScopeRequestId;
+  resetCopySourceTables();
+  copySourceTableSearch.value = "";
+  copySourceError.value = "";
+  copySourceScopeReady.value = false;
+  copySourceScopeLoading.value = true;
+  if (level === "connection") {
+    copySourceConnectionId.value = value;
+    copySourceCatalog.value = "";
+    copySourceCatalogs.value = [];
+  }
+  if (level === "catalog") copySourceCatalog.value = value;
+  if (level === "connection" || level === "catalog") {
+    copySourceDatabase.value = "";
+    copySourceDatabases.value = [];
+  }
+  if (level === "database") copySourceDatabase.value = value;
+  if (level !== "schema") {
+    copySourceSchema.value = "";
+    copySourceSchemas.value = [];
+  } else copySourceSchema.value = value;
+  const config = copySourceConnection.value;
+  const current = () => requestId === copySourceScopeRequestId && copyColumnsDialogOpen.value;
+  try {
+    if (!config || !isCompatibleCopyConnection(config)) return;
+    await store.ensureConnected(config.id, { activate: false });
+    if (!current() || !copySourceCompatible.value) return;
+    if (level === "connection" && connectionIsDorisFamilyCatalogCapable(config)) {
+      const catalogs = await api.listDorisCatalogs(config.id);
+      if (!current()) return;
+      copySourceCatalogs.value = catalogs;
+      copySourceCatalog.value = selectedQueryCatalogName(catalogs, prefill ? props.catalog : undefined);
+      if (!copySourceCatalog.value) return;
+    }
+    if (level === "connection" || level === "catalog") {
+      const catalog = copySourceTargetCatalog.value;
+      const databases = catalog ? await fetchCatalogNamespaceOptions(config.id, catalog, config) : await fetchNamespaceOptionsForConnection(config.id, config);
+      if (!current()) return;
+      copySourceDatabases.value = databases;
+      const preferred = prefill ? props.database : namespaceOptionsAreSchemas(config) ? config.username : config.database;
+      copySourceDatabase.value = databases.includes(preferred || "") ? preferred || "" : (databases[0] ?? "");
+    }
+    if (!copySourceDatabases.value.includes(copySourceDatabase.value)) return;
+    if (copySourceRootSchemaMode.value) {
+      // Oracle/Dameng expose their owner as the namespace immediately below a connection.
+      copySourceSchema.value = copySourceDatabase.value;
+    } else if (copySourceHasSchema.value && level !== "schema") {
+      const database = copySourceDatabase.value;
+      const schemas = await api.listSchemas(config.id, database);
+      if (!current()) return;
+      copySourceSchemas.value = schemaOptionsForConnection(schemas, config, database);
+      const preferred = prefill ? metadataSchema.value : "";
+      copySourceSchema.value = copySourceSchemas.value.includes(preferred) ? preferred : (copySourceSchemas.value[0] ?? "");
+    }
+    if (copySourceHasSchema.value && !copySourceSchemas.value.includes(copySourceSchema.value)) return;
+    // Preserve explicit metadata scope for an unknown JDBC driver on the current connection.
+    if (prefill && !copySourceRootSchemaMode.value && !copySourceHasSchema.value) copySourceSchema.value = props.schema || "";
+    copySourceScopeReady.value = true;
+  } catch (error: any) {
+    if (current()) copySourceError.value = error?.message || String(error);
+  } finally {
+    if (current()) copySourceScopeLoading.value = false;
+  }
+  if (current() && copySourceScopeReady.value) await loadCopySourceTables();
+}
+
 function normalizedColumnSearch(value: string): string {
   return value.trim().toLowerCase();
 }
@@ -3587,7 +4334,9 @@ function clearCopySourceTableSearchTimer() {
 
 function isCopySourceTable(table: TableInfo): boolean {
   const databaseInfo = connection.value?.database_info;
-  return isCreateMode.value || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
+  const sameNamespace =
+    copySourceConnectionId.value === props.connectionId && copySourceDatabase.value === props.database && copySourceMetadataSchema.value === metadataSchema.value && (copySourceTargetCatalog.value || "") === (normalizedQueryTabCatalog(copySourceCatalogs.value, props.catalog || "") || "");
+  return isCreateMode.value || !sameNamespace || tableStructureIdentifierComparisonKey(table.name, databaseType.value, databaseInfo) !== tableStructureIdentifierComparisonKey(props.tableName, databaseType.value, databaseInfo);
 }
 
 function clearCopySourceTableSelection() {
@@ -3600,14 +4349,13 @@ function clearCopySourceTableSelection() {
 }
 
 async function loadCopySourceTables(offset = 0) {
-  if (!props.connectionId || !props.database) return;
+  if (!copyColumnsDialogOpen.value || !copySourceScopeReady.value || !copySourceCompatible.value || copySourceScopeLoading.value) return;
   clearCopySourceTableSelection();
   const requestId = ++copySourceTablesRequestId;
   copySourceTablesLoading.value = true;
   copySourceError.value = "";
   try {
-    await store.ensureConnected(props.connectionId);
-    const tables = await api.listTables(props.connectionId, props.database, metadataSchema.value, copySourceTableSearch.value.trim() || undefined, COPY_SOURCE_TABLE_PAGE_PROBE_SIZE, offset, ["TABLE"], props.catalog);
+    const tables = await api.listTables(copySourceConnectionId.value, copySourceDatabase.value, copySourceMetadataSchema.value, copySourceTableSearch.value.trim() || undefined, COPY_SOURCE_TABLE_PAGE_PROBE_SIZE, offset, ["TABLE"], copySourceTargetCatalog.value);
     if (requestId !== copySourceTablesRequestId) return;
     copySourceTables.value = tables.slice(0, COPY_SOURCE_TABLE_PAGE_SIZE).filter(isCopySourceTable);
     copySourceTablesOffset.value = offset;
@@ -3626,50 +4374,52 @@ async function loadCopySourceTables(offset = 0) {
 
 function updateCopySourceTableSearch(value: string | number) {
   copySourceTableSearch.value = String(value);
-  clearCopySourceTableSelection();
+  // Invalidate any in-flight load and restart the debounce, but keep the
+  // current list visible until the new results land to avoid a blank flicker.
   clearCopySourceTableSearchTimer();
+  ++copySourceTablesRequestId;
   copySourceTableSearchTimer = setTimeout(() => {
     copySourceTableSearchTimer = undefined;
     void loadCopySourceTables();
   }, COPY_SOURCE_TABLE_SEARCH_DEBOUNCE_MS);
 }
 
-watch(copyColumnsDialogOpen, (open) => {
-  if (open) return;
-  clearCopySourceTableSearchTimer();
-  copySourceTablesRequestId++;
-  copySourceColumnsRequestId++;
-});
+watch(
+  copyColumnsDialogOpen,
+  (open) => {
+    if (open) return;
+    ++copySourceScopeRequestId;
+    copySourceScopeReady.value = false;
+    copySourceScopeLoading.value = false;
+    resetCopySourceTables();
+  },
+  { flush: "sync" },
+);
+
+watch(
+  () => [props.connectionId, props.database, props.schema, props.catalog, props.tableName],
+  () => {
+    copyColumnsDialogOpen.value = false;
+  },
+  { flush: "sync" },
+);
 
 async function openCopyColumnsDialog() {
   if (!canAddColumn.value || !props.connectionId || !props.database) return;
   copyColumnsDialogOpen.value = true;
-  copySourceTableName.value = "";
-  copySourceTableSearch.value = "";
-  copySourceColumns.value = [];
-  copySourceColumnSearch.value = "";
-  selectedCopySourceColumnNames.value = [];
-  copySourceError.value = "";
-  copySourceColumnsRequestId++;
-  copySourceColumnsLoading.value = false;
-  copySourceTables.value = [];
-  copySourceTablesOffset.value = 0;
-  copySourceTablesHasMore.value = false;
-  clearCopySourceTableSearchTimer();
-  await loadCopySourceTables();
+  await changeCopySourceScope("connection", props.connectionId, true);
 }
 
 async function loadCopySourceColumns(tableName: string) {
+  if (!copySourceScopeReady.value || !copySourceCompatible.value || copySourceScopeLoading.value || copySourceTablesLoading.value) return;
+  clearCopySourceTableSelection();
   copySourceTableName.value = tableName;
-  copySourceColumns.value = [];
-  copySourceColumnSearch.value = "";
-  selectedCopySourceColumnNames.value = [];
   copySourceError.value = "";
-  if (!tableName || !props.connectionId || !props.database) return;
+  if (!tableName) return;
   const requestId = ++copySourceColumnsRequestId;
   copySourceColumnsLoading.value = true;
   try {
-    const sourceColumns = await api.getColumns(props.connectionId, props.database, metadataSchema.value, tableName, props.catalog);
+    const sourceColumns = await api.getColumns(copySourceConnectionId.value, copySourceDatabase.value, copySourceMetadataSchema.value, tableName, copySourceTargetCatalog.value);
     if (requestId !== copySourceColumnsRequestId) return;
     copySourceColumns.value = sourceColumns;
     selectedCopySourceColumnNames.value = copyableSourceColumns.value.filter(({ alreadyExists }) => !alreadyExists).map(({ column }) => column.name);
@@ -3686,7 +4436,15 @@ function toggleCopySourceColumns() {
 }
 
 function applyCopiedColumns() {
-  const copiedColumns = createCopiedColumnDrafts(selectedCopySourceColumns.value, databaseType.value, uuid);
+  if (!canAddColumn.value || !copySourceCompatible.value || !copySourceScopeReady.value || copySourceScopeLoading.value || copySourceTablesLoading.value || copySourceColumnsLoading.value || copySourceError.value) return;
+  const names = new Set(columns.value.filter((column) => !column.markedForDrop).map((column) => tableStructureIdentifierComparisonKey(column.name, databaseType.value, connection.value?.database_info)));
+  const sourceColumns = selectedCopySourceColumns.value.filter((column) => {
+    const key = tableStructureIdentifierComparisonKey(column.name, databaseType.value, connection.value?.database_info);
+    if (names.has(key)) return false;
+    names.add(key);
+    return true;
+  });
+  const copiedColumns = createCopiedColumnDrafts(sourceColumns, databaseType.value, uuid);
   if (!copiedColumns.length) return;
   const insertAt = resolveInsertColumnIndex(columns.value, selectedColumnId.value);
   columns.value.splice(insertAt, 0, ...copiedColumns);
@@ -3790,12 +4548,27 @@ function canDropColumnAt(sourceIndex: number, insertionIndex: number): boolean {
   if (!sourceColumn) return false;
   const crossedColumns = insertionIndex < sourceIndex ? columns.value.slice(insertionIndex, sourceIndex) : columns.value.slice(sourceIndex + 1, insertionIndex);
   if (crossedColumns.some((column) => column.markedForDrop)) return false;
+  if (!isCreateMode.value && databaseType.value === "starrocks" && structureCapabilities.value.reorderColumn) {
+    const reordered = [...columns.value];
+    reordered.splice(sourceIndex, 1);
+    reordered.splice(insertionIndex > sourceIndex ? insertionIndex - 1 : insertionIndex, 0, sourceColumn);
+    const keys = new Set(starrocksAlterContext.value?.keyColumns.map((name) => name.toLowerCase()) ?? []);
+    let sawValue = false;
+    for (const column of reordered) {
+      if (column.markedForDrop) continue;
+      if (keys.has(column.original?.name.toLowerCase() ?? "")) {
+        if (sawValue) return false;
+      } else {
+        sawValue = true;
+      }
+    }
+  }
   if (canShowColumnDragControls.value) return true;
   if (sourceColumn.original) return false;
   return crossedColumns.every((column) => !column.original);
 }
 
-const usesLocalTableColumnOrder = computed(() => !isCreateMode.value && supportsLocalTableColumnReorder(databaseType.value, connection.value?.db_type));
+const usesLocalTableColumnOrder = computed(() => !isCreateMode.value && (databaseType.value === "starrocks" ? !!starrocksAlterContext.value?.model && starrocksAlterContext.value.model !== "duplicate" : supportsLocalTableColumnReorder(databaseType.value, connection.value?.db_type)));
 const canShowColumnDragControls = computed(() => isCreateMode.value || structureCapabilities.value.reorderColumn || usesLocalTableColumnOrder.value);
 
 function localTableColumnOrderScopeKey(): string {
@@ -4564,6 +5337,7 @@ function commitColumnNameInput(column: EditableStructureColumn) {
 }
 
 function isColumnTypeDisabled(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && starRocksColumnDefinitionLocked(column, starrocksAlterContext.value)) return true;
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterType);
 }
 
@@ -4584,10 +5358,12 @@ function isColumnLengthUnitDisabled(column: EditableStructureColumn): boolean {
 }
 
 function isColumnNullableDisabled(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && (starRocksColumnDefinitionLocked(column, starrocksAlterContext.value) || column.original?.is_nullable)) return true;
   return column.markedForDrop || column.isPrimaryKey || (!!column.original && !structureCapabilities.value.alterNullability);
 }
 
 function isColumnDefaultDisabled(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && starRocksColumnDefinitionLocked(column, starrocksAlterContext.value)) return true;
   return column.markedForDrop || (!!column.original && !structureCapabilities.value.alterDefault) || isMysqlGeneratedActive(column);
 }
 
@@ -4609,6 +5385,7 @@ function isPrimaryKeyDisabled(column: EditableStructureColumn): boolean {
 }
 
 function canDropColumn(column: EditableStructureColumn): boolean {
+  if (databaseType.value === "starrocks" && (starRocksColumnDefinitionLocked(column, starrocksAlterContext.value) || starrocksAlterContext.value?.keyColumns.some((name) => name.toLowerCase() === column.original?.name.toLowerCase()))) return false;
   return !!column.original && !column.isPrimaryKey && !isProtectedManticoreIdColumn(databaseType.value, column.original.name) && structureCapabilities.value.dropColumn;
 }
 
@@ -4886,7 +5663,8 @@ function canDropIndex(index: EditableStructureIndex): boolean {
   return !!index.original && !index.isPrimary && structureCapabilities.value.dropIndex;
 }
 
-const canEditForeignKeys = computed(() => structureCapabilities.value.foreignKey);
+const isOracleForeignKeyEditor = computed(() => databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle");
+const canEditForeignKeys = computed(() => (isOracleForeignKeyEditor.value ? true : structureCapabilities.value.foreignKey));
 const canEditTriggers = computed(() => structureDialect.value === "mysql" || structureDialect.value === "oracle" || structureDialect.value === "sqlserver");
 const isOracleTriggerEditor = computed(() => structureDialect.value === "oracle");
 const isSqlServerTriggerEditor = computed(() => structureDialect.value === "sqlserver");
@@ -4917,6 +5695,7 @@ function addForeignKey() {
     refSchema: "",
     refTable: "",
     refColumn: "",
+    ...(isOracleForeignKeyEditor.value ? { columns: [""], refColumns: [""], oracleState: { enabled: true, validated: true, deferrable: false, initiallyDeferred: false, rely: false } } : {}),
     onUpdate: "",
     onDelete: "",
     markedForDrop: false,
@@ -4929,11 +5708,119 @@ function removeNewForeignKey(foreignKey: EditableStructureForeignKey) {
 
 function toggleDropForeignKey(foreignKey: EditableStructureForeignKey) {
   if (foreignKeysLoading.value || !foreignKey.original) return;
+  if (isOracleForeignKeyEditor.value && (!foreignKey.oracleOriginal || foreignKeyDefinitionBusy.value || saving.value)) return;
   foreignKey.markedForDrop = !foreignKey.markedForDrop;
 }
 
 function canEditForeignKeyDraft(foreignKey: EditableStructureForeignKey): boolean {
+  if (isOracleForeignKeyEditor.value) return !foreignKeysLoading.value && !foreignKeyDefinitionBusy.value && !saving.value && !foreignKey.markedForDrop && (!foreignKey.original || !!foreignKey.oracleOriginal);
   return !foreignKeysLoading.value && canEditForeignKeys.value && !foreignKey.markedForDrop;
+}
+
+async function editOracleForeignKey(foreignKey: EditableStructureForeignKey) {
+  if (!isOracleForeignKeyEditor.value || foreignKeyDefinitionBusy.value || saving.value || foreignKeysLoading.value || !foreignKey.original) return;
+  const target = { ...primaryKeyTarget(), databaseType: databaseType.value === "oracle" ? ("oracle" as const) : ("oceanbase-oracle" as const) };
+  const identity = JSON.stringify(target);
+  foreignKeyDefinitionBusy.value = true;
+  try {
+    const definitions = await readOracleForeignKeyDefinitions(target);
+    if (primaryKeyUnmounted || identity !== JSON.stringify(primaryKeyTarget()) || !foreignKeys.value.includes(foreignKey)) return;
+    const definition = definitions.find((key) => key.name === foreignKey.original!.name);
+    if (!definition) throw new Error(t("oceanbasePrimaryKey.incompleteMetadata"));
+    foreignKey.name = definition.name;
+    foreignKey.columns = [...definition.columns];
+    foreignKey.refColumns = [...definition.refColumns];
+    foreignKey.column = definition.columns.join(", ");
+    foreignKey.refColumn = definition.refColumns.join(", ");
+    foreignKey.refSchema = definition.refSchema;
+    foreignKey.refTable = definition.refTable;
+    foreignKey.onDelete = definition.onDelete;
+    foreignKey.onUpdate = "";
+    foreignKey.oracleState = { ...definition.state };
+    foreignKey.oracleOriginal = cloneDraftValue(definition);
+    foreignKey.original = { ...foreignKey.original, name: definition.name, column: foreignKey.column, ref_column: foreignKey.refColumn, ref_schema: definition.refSchema, ref_table: definition.refTable, on_delete: definition.onDelete, on_update: "" };
+    void loadOracleForeignKeyReferenceColumns(foreignKey);
+  } catch (error) {
+    if (!primaryKeyUnmounted && identity === JSON.stringify(primaryKeyTarget()) && foreignKeys.value.includes(foreignKey)) errorMessage.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    foreignKeyDefinitionBusy.value = false;
+  }
+}
+
+function syncForeignKeyPairText(foreignKey: EditableStructureForeignKey) {
+  foreignKey.column = foreignKey.columns?.join(", ") ?? "";
+  foreignKey.refColumn = foreignKey.refColumns?.join(", ") ?? "";
+}
+
+function foreignKeyReferenceListId(foreignKey: EditableStructureForeignKey) {
+  return `${foreignKeyReferenceListPrefix}-${foreignKey.id.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
+}
+
+function setOracleForeignKeyPair(foreignKey: EditableStructureForeignKey, position: number, value: unknown, local: boolean) {
+  if (!canEditForeignKeyDraft(foreignKey)) return;
+  const list = local ? foreignKey.columns : foreignKey.refColumns;
+  if (!list || position < 0 || position >= list.length) return;
+  list[position] = String(value ?? "");
+  syncForeignKeyPairText(foreignKey);
+}
+
+function moveOracleForeignKeyPair(foreignKey: EditableStructureForeignKey, position: number, direction: number) {
+  if (!canEditForeignKeyDraft(foreignKey) || !foreignKey.columns || !foreignKey.refColumns || position + direction < 0 || position + direction >= foreignKey.columns.length) return;
+  for (const list of [foreignKey.columns, foreignKey.refColumns]) {
+    const [name] = list.splice(position, 1);
+    list.splice(position + direction, 0, name!);
+  }
+  syncForeignKeyPairText(foreignKey);
+}
+
+function addOracleForeignKeyPair(foreignKey: EditableStructureForeignKey) {
+  if (!canEditForeignKeyDraft(foreignKey)) return;
+  foreignKey.columns?.push("");
+  foreignKey.refColumns?.push("");
+  syncForeignKeyPairText(foreignKey);
+}
+
+function removeOracleForeignKeyPair(foreignKey: EditableStructureForeignKey, position: number) {
+  if (!canEditForeignKeyDraft(foreignKey)) return;
+  foreignKey.columns?.splice(position, 1);
+  foreignKey.refColumns?.splice(position, 1);
+  syncForeignKeyPairText(foreignKey);
+}
+
+function setOracleForeignKeyTarget(foreignKey: EditableStructureForeignKey, value: unknown, schema: boolean) {
+  if (!canEditForeignKeyDraft(foreignKey)) return;
+  const next = String(value ?? "");
+  if (next === (schema ? foreignKey.refSchema : foreignKey.refTable)) return;
+  if (schema) foreignKey.refSchema = next;
+  else foreignKey.refTable = next;
+  foreignKey.refColumns = foreignKey.columns?.map(() => "");
+  foreignKeyReferenceColumns.value[foreignKey.id] = [];
+  syncForeignKeyPairText(foreignKey);
+  void loadOracleForeignKeyReferenceColumns(foreignKey);
+}
+
+async function loadOracleForeignKeyReferenceColumns(foreignKey: EditableStructureForeignKey) {
+  const target = primaryKeyTarget();
+  const parent = { schema: foreignKey.refSchema, table: foreignKey.refTable };
+  if (!parent.schema || !parent.table) return;
+  const current = () => !primaryKeyUnmounted && JSON.stringify(target) === JSON.stringify(primaryKeyTarget()) && foreignKeys.value.includes(foreignKey) && foreignKey.refSchema === parent.schema && foreignKey.refTable === parent.table;
+  try {
+    const choices = await api.getColumns(target.connectionId, target.database, parent.schema, parent.table, target.catalog);
+    if (current()) foreignKeyReferenceColumns.value[foreignKey.id] = choices;
+  } catch {
+    // Parent columns can be invisible under column-level REFERENCES grants.
+    // Keep exact-name entry available; write preflight decides admissibility.
+    if (current()) foreignKeyReferenceColumns.value[foreignKey.id] = [];
+  }
+}
+
+function setOracleForeignKeyState(foreignKey: EditableStructureForeignKey, key: "enabled" | "validated" | "deferrable" | "initiallyDeferred" | "rely", value: boolean) {
+  if (!canEditForeignKeyDraft(foreignKey) || !foreignKey.oracleState) return;
+  if ((key === "deferrable" || key === "initiallyDeferred") && databaseType.value !== "oracle") return;
+  if (key === "initiallyDeferred" && value && !foreignKey.oracleState.deferrable) return;
+  foreignKey.oracleState[key] = value;
+  if (!foreignKey.oracleState.deferrable) foreignKey.oracleState.initiallyDeferred = false;
+  if (foreignKey.oracleState.validated) foreignKey.oracleState.rely = false;
 }
 
 function addTrigger() {
@@ -4945,6 +5832,7 @@ function addTrigger() {
     timing: isOracleTriggerEditor.value ? "BEFORE EACH ROW" : isSqlServerTriggerEditor.value ? "AFTER" : "BEFORE",
     event: "INSERT",
     statement: isOracleTriggerEditor.value ? "BEGIN\n  NULL;\nEND" : isSqlServerTriggerEditor.value ? "BEGIN\n  SET NOCOUNT ON;\nEND" : "BEGIN\n  \nEND",
+    enabled: true,
     markedForDrop: false,
   };
   triggers.value.push(draft);
@@ -4961,7 +5849,13 @@ function toggleDropTrigger(trigger: EditableStructureTrigger) {
 }
 
 function canEditTriggerDraft(trigger: EditableStructureTrigger): boolean {
-  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop && canEditStructuredTriggerDraft(databaseType.value, trigger);
+  return canToggleTriggerEnabled(trigger) && canEditStructuredTriggerDraft(databaseType.value, trigger);
+}
+
+// ALTER TRIGGER ... ENABLE/DISABLE leaves the source untouched, so it stays available for
+// triggers whose source the structured form cannot rebuild.
+function canToggleTriggerEnabled(trigger: EditableStructureTrigger): boolean {
+  return !triggersLoading.value && canEditTriggers.value && !trigger.markedForDrop;
 }
 
 function primarySqlOperation(sql: string): string {
@@ -5035,8 +5929,722 @@ function toggleSqlPreviewCollapsed() {
   safeLocalStorageSet(STRUCTURE_SQL_PREVIEW_COLLAPSED_STORAGE_KEY, String(sqlPreviewCollapsed.value));
 }
 
+async function applyExistingPrimaryKey(): Promise<boolean> {
+  if (primaryKeyBusy.value || !existingPrimaryKeyPlan.value) return false;
+  const plan = cloneDraftValue(existingPrimaryKeyPlan.value);
+  const plannedSession = existingPrimaryKeySession.value;
+  if (!plannedSession) return false;
+  const identity = JSON.stringify(plan.target);
+  const draft = JSON.stringify(plan.draft ?? plan.change);
+  const connectionAtStart = store.getConfig(plan.target.connectionId);
+  const sameTarget = () => !primaryKeyUnmounted && identity === JSON.stringify(primaryKeyTarget());
+  const connectionCurrent = () =>
+    store.connectionStateRevision(plan.target.connectionId) === plannedSession.revision &&
+    store.isCurrentConnectionStateRevision(plan.target.connectionId, plannedSession.revision) &&
+    (store.getConfig(plan.target.connectionId) ? connectionConfigFingerprint(store.getConfig(plan.target.connectionId)!) : "") === plannedSession.configFingerprint;
+  const canStart = () => sameTarget() && connectionCurrent() && draft === JSON.stringify(existingPrimaryKeyDraft.value) && !hasPendingStructureChanges(false) && !ddlDirty.value;
+  if (!canStart()) {
+    if (sameTarget() && !connectionCurrent()) {
+      existingPrimaryKeyPlan.value = undefined;
+      existingPrimaryKeySession.value = undefined;
+      pendingStatements.value = [];
+      warnings.value = [t("oceanbasePrimaryKey.refreshRequired")];
+    }
+    return false;
+  }
+  primaryKeyBusy.value = true;
+  saving.value = true;
+  const startedAt = Date.now();
+  try {
+    const protection = productionContextForDatabase(connectionAtStart, plan.target.database);
+    if (protection.active) {
+      const accepted = await productionSafetyStore.requestConfirmation({
+        sql: plan.statements.join("\n"),
+        connectionName: connectionAtStart?.name,
+        database: plan.target.database,
+        productionDatabases: protection.databases,
+        source: t("production.sourceStructure"),
+        scopeId: primaryKeyConfirmationScope,
+      });
+      if (!accepted || !canStart()) {
+        if (sameTarget() && !connectionCurrent()) {
+          existingPrimaryKeyPlan.value = undefined;
+          existingPrimaryKeySession.value = undefined;
+          pendingStatements.value = [];
+          warnings.value = [t("oceanbasePrimaryKey.refreshRequired")];
+        }
+        return false;
+      }
+    }
+    const timeout = queryTimeoutSecsForConnection(connectionAtStart, settingsStore.editorSettings.globalQueryTimeoutSecs);
+    const result = await executeOceanbasePrimaryKeyPlan(plan, timeout, { canStart, connectionCurrent });
+    if (!result) {
+      if (sameTarget() && !connectionCurrent()) {
+        existingPrimaryKeyPlan.value = undefined;
+        existingPrimaryKeySession.value = undefined;
+        pendingStatements.value = [];
+        warnings.value = [t("oceanbasePrimaryKey.refreshRequired")];
+      }
+      return false;
+    }
+    const completed = result.steps.every((step) => step.state === "committed");
+    let details = result.steps.map((step, index) => `${index + 1}. ${t(`oceanbasePrimaryKey.${step.state}`)}\n${step.sql}${step.error ? `\n${step.error}` : ""}`).join("\n\n");
+    if (result.indexStates?.length) details += `\n\n${result.indexStates.map((index) => `${index.name}: ${t(`oceanbasePrimaryKey.${index.state}`)}`).join("\n")}`;
+    for (const step of result.steps.filter((item) => item.state !== "notExecuted")) {
+      try {
+        await historyStore.add({
+          connection_id: plan.target.connectionId,
+          connection_name: connectionAtStart?.name || "",
+          database: plan.target.database,
+          sql: step.sql,
+          execution_time_ms: Date.now() - startedAt,
+          success: step.state === "committed",
+          error: step.state === "committed" ? undefined : `${t(`oceanbasePrimaryKey.${step.state}`)}: ${step.error || ""}`,
+          activity_kind: "schema_change",
+          operation: "ALTER TABLE",
+          target: plan.target.tableName,
+        });
+      } catch (error) {
+        console.warn("[DBX][structure-history:save-failed]", error);
+      }
+    }
+    if (connectionCurrent()) {
+      try {
+        invalidateTableMetadataCache(plan.target);
+        await invalidateObjectMetadataCache(plan.target);
+        await invalidateObjectDdl(plan.target);
+      } catch (error) {
+        result.readbackError = [result.readbackError, primaryKeyError(error)].filter(Boolean).join("\n");
+      }
+    }
+    if (sameTarget()) {
+      existingPrimaryKeyPlan.value = undefined;
+      existingPrimaryKeySession.value = undefined;
+      pendingStatements.value = [];
+      if (completed && !result.readbackError && connectionCurrent()) {
+        existingPrimaryKeyDraft.value = undefined;
+        loadedMetadataFacets.clear();
+        ddlFetched.value = false;
+        rawDdlContent.value = "";
+        const refresh = await loadStructure(true, { columns: true, indexes: true, constraints: true, foreignKeys: false, triggers: false, partitions: false, tableComment: false }, true, { forceMetadata: true, blockSecondaryMetadata: true });
+        if (refresh?.error) result.readbackError = refresh.error;
+        if (sameTarget()) {
+          const refreshErrors = [errorMessage.value, ...Object.values(secondaryMetadataErrors.value)].filter(Boolean);
+          if (refreshErrors.length) result.readbackError = refreshErrors.join("\n");
+          emit("saved", false);
+        }
+      } else {
+        warnings.value = [t("oceanbasePrimaryKey.refreshRequired")];
+      }
+      syncDraftToParent();
+    }
+    const succeeded = completed && !result.readbackError && connectionCurrent();
+    if (succeeded) {
+      toast(t("structureEditor.saved"), 2500);
+      if (!result.recoverySql) return true;
+    }
+    if (result.readbackError) details += `\n\n${t("oceanbasePrimaryKey.readbackFailed")}: ${result.readbackError === "definitionChanged" ? t("oceanbasePrimaryKey.definitionChanged") : result.readbackError}`;
+    if (result.recoverySql) details += `\n\n${t("oceanbasePrimaryKey.recoveryNotice")}\n${result.recoverySql}`;
+    primaryKeyResultTitle.value = "oceanbasePrimaryKey.resultTitle";
+    primaryKeyResultMessage.value = `${plan.target.schema}.${plan.target.tableName}: ${t(succeeded ? "structureEditor.saved" : "oceanbasePrimaryKey.executionFailed")}`;
+    primaryKeyResultDetails.value = details;
+    if (!primaryKeyUnmounted) primaryKeyResultOpen.value = true;
+    else toast(primaryKeyResultMessage.value, 10000);
+    return succeeded;
+  } catch (error) {
+    if (sameTarget()) errorMessage.value = primaryKeyError(error);
+    return false;
+  } finally {
+    primaryKeyBusy.value = false;
+    saving.value = false;
+  }
+}
+
+async function applyOracleForeignKeyPlan(): Promise<boolean> {
+  if (oracleForeignKeyBusy.value || !existingOracleForeignKeyPlan.value) return false;
+  const plan = cloneDraftValue(existingOracleForeignKeyPlan.value);
+  const plannedSession = existingOracleForeignKeySession.value;
+  if (!plannedSession) return false;
+  const identity = JSON.stringify(plan.target);
+  const changes = JSON.stringify(oracleForeignKeyChanges());
+  const connectionAtStart = store.getConfig(plan.target.connectionId);
+  const sameTarget = () => !primaryKeyUnmounted && identity === JSON.stringify(primaryKeyTarget());
+  const connectionCurrent = () =>
+    store.connectionStateRevision(plan.target.connectionId) === plannedSession.revision &&
+    store.isCurrentConnectionStateRevision(plan.target.connectionId, plannedSession.revision) &&
+    (store.getConfig(plan.target.connectionId) ? connectionConfigFingerprint(store.getConfig(plan.target.connectionId)!) : "") === plannedSession.configFingerprint;
+  const noOtherDrafts = () => {
+    const scope = captureStructureRefreshScope();
+    return !scope.columns && !scope.indexes && !scope.triggers && !scope.tableComment && !partitionOperations.value.length && !existingPrimaryKeyChanged.value && !ddlDirty.value;
+  };
+  const canStart = () => sameTarget() && changes === JSON.stringify(oracleForeignKeyChanges()) && noOtherDrafts();
+  const stillCurrent = () => canStart() && connectionCurrent();
+  if (!stillCurrent()) return false;
+  oracleForeignKeyBusy.value = true;
+  saving.value = true;
+  const startedAt = Date.now();
+  let refreshError = "";
+  try {
+    const protection = productionContextForDatabase(connectionAtStart, plan.target.database);
+    if (protection.active) {
+      const accepted = await productionSafetyStore.requestConfirmation({
+        sql: plan.statements.join("\n"),
+        connectionName: connectionAtStart?.name,
+        database: plan.target.database,
+        productionDatabases: protection.databases,
+        source: t("production.sourceStructure"),
+        scopeId: oracleForeignKeyConfirmationScope,
+      });
+      if (!accepted || !stillCurrent()) return false;
+    }
+    const timeout = queryTimeoutSecsForConnection(connectionAtStart, settingsStore.editorSettings.globalQueryTimeoutSecs);
+    const result = await executeOracleForeignKeyPlan(plan, timeout, { canStart, connectionCurrent });
+    if (!result) return false;
+    const completed = result.steps.every((step) => step.state === "committed");
+    let details = result.steps.map((step, index) => `${index + 1}. ${t(`oceanbasePrimaryKey.${step.state}`)}\n${step.sql}${step.error ? `\n${step.error}` : ""}`).join("\n\n");
+    if (result.recoverySql?.length) details += `\n\n${t("oracleForeignKey.recoveryNotice")}\n${result.recoverySql.join("\n")}`;
+    for (const step of result.steps.filter((item) => item.state !== "notExecuted")) {
+      try {
+        await historyStore.add({
+          connection_id: plan.target.connectionId,
+          connection_name: connectionAtStart?.name || "",
+          database: plan.target.database,
+          sql: step.sql,
+          execution_time_ms: Date.now() - startedAt,
+          success: step.state === "committed",
+          error: step.state === "committed" ? undefined : `${t(`oceanbasePrimaryKey.${step.state}`)}: ${step.error || ""}`,
+          activity_kind: "schema_change",
+          operation: "ALTER TABLE",
+          target: plan.target.tableName,
+        });
+      } catch (error) {
+        console.warn("[DBX][structure-history:save-failed]", error);
+      }
+    }
+    if (!sameTarget() || !connectionCurrent()) return false;
+    if (result.steps.some((step) => step.state !== "notExecuted")) {
+      try {
+        const affected = new Map([[JSON.stringify([plan.target.schema, plan.target.tableName]), { ...plan.target }]]);
+        for (const change of plan.changes) {
+          for (const definition of [change.original, change.target]) {
+            if (definition) affected.set(JSON.stringify([definition.refSchema, definition.refTable]), { ...plan.target, schema: definition.refSchema, tableName: definition.refTable });
+          }
+        }
+        for (const object of affected.values()) {
+          invalidateTableMetadataCache(object);
+          await invalidateObjectMetadataCache(object);
+          if (!sameTarget() || !connectionCurrent()) return false;
+          await invalidateObjectDdl(object);
+          if (!sameTarget() || !connectionCurrent()) return false;
+        }
+      } catch (error) {
+        refreshError = error instanceof Error ? error.message : String(error);
+      }
+    }
+    if (sameTarget() && connectionCurrent()) {
+      existingOracleForeignKeyPlan.value = undefined;
+      existingOracleForeignKeySession.value = undefined;
+      pendingStatements.value = [];
+      if (completed && !result.readbackError && !refreshError) {
+        oracleForeignKeyCreateRecovery.value = undefined;
+        loadedMetadataFacets.clear();
+        ddlFetched.value = false;
+        rawDdlContent.value = "";
+        const refresh = await loadStructure(true, { columns: false, indexes: false, constraints: false, foreignKeys: true, triggers: false, partitions: false, tableComment: false }, true, { forceMetadata: true, blockSecondaryMetadata: true });
+        if (!sameTarget() || !connectionCurrent()) return false;
+        if (refresh?.error) refreshError = refresh.error;
+        if (!refreshError && sameTarget()) emit("saved", false);
+        syncDraftToParent();
+      } else {
+        warnings.value = [t("oracleForeignKey.refreshRequired")];
+      }
+      syncDraftToParent();
+    }
+    if (!sameTarget() || !connectionCurrent()) return false;
+    const readbackError = [result.readbackError, refreshError].filter(Boolean).join("\n");
+    const succeeded = completed && !readbackError;
+    if (succeeded) toast(t("structureEditor.saved"), 2500);
+    if (readbackError) details += `\n\n${t("oracleForeignKey.readbackFailed")}: ${readbackError}`;
+    if (!succeeded || result.recoverySql?.length) {
+      primaryKeyResultTitle.value = "oracleForeignKey.resultTitle";
+      primaryKeyResultMessage.value = `${plan.target.schema}.${plan.target.tableName}: ${t(succeeded ? "structureEditor.saved" : "oracleForeignKey.executionFailed")}`;
+      primaryKeyResultDetails.value = details;
+      if (!primaryKeyUnmounted) primaryKeyResultOpen.value = true;
+      else toast(primaryKeyResultMessage.value, 10000);
+    }
+    return succeeded;
+  } catch (error) {
+    if (sameTarget() && connectionCurrent()) errorMessage.value = error instanceof Error ? error.message : String(error);
+    return false;
+  } finally {
+    oracleForeignKeyBusy.value = false;
+    saving.value = false;
+  }
+}
+
+async function applyOracleConstraintPlan(): Promise<boolean> {
+  if (oracleConstraintBusy.value || !oracleConstraintPlan.value || !oracleConstraintSession.value || !oracleConstraintDraft.value) return false;
+  const plan = cloneDraftValue(oracleConstraintPlan.value);
+  const session = oracleConstraintSession.value;
+  const draft = JSON.stringify(oracleConstraintDraft.value);
+  const connection = store.getConfig(plan.target.connectionId);
+  const sameTarget = () => !primaryKeyUnmounted && JSON.stringify(oracleConstraintTarget()) === JSON.stringify(plan.target);
+  const connectionCurrent = () =>
+    store.connectionStateRevision(plan.target.connectionId) === session.revision &&
+    store.isCurrentConnectionStateRevision(plan.target.connectionId, session.revision) &&
+    (store.getConfig(plan.target.connectionId) ? connectionConfigFingerprint(store.getConfig(plan.target.connectionId)!) : "") === session.configFingerprint;
+  const canStart = () => sameTarget() && draft === JSON.stringify(oracleConstraintDraft.value) && !hasPendingStructureChanges(false, false) && !ddlDirty.value;
+  const stillCurrent = () => canStart() && connectionCurrent();
+  if (!stillCurrent() || session.draftFingerprint !== draft) return false;
+  oracleConstraintBusy.value = true;
+  saving.value = true;
+  const startedAt = Date.now();
+  try {
+    const protection = productionContextForDatabase(connection, plan.target.database);
+    if (protection.active) {
+      const accepted = await productionSafetyStore.requestConfirmation({
+        sql: plan.statements.join("\n"),
+        connectionName: connection?.name,
+        database: plan.target.database,
+        productionDatabases: protection.databases,
+        source: t("production.sourceStructure"),
+        scopeId: oracleConstraintConfirmationScope,
+      });
+      if (!accepted || !stillCurrent()) return false;
+    }
+    const timeout = queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs);
+    const result = await executeOracleConstraintPlan(plan, timeout, { canStart, connectionCurrent });
+    if (!result) return false;
+    const completed = result.steps.length > 0 && result.steps.every((step) => step.state === "committed") && !result.readbackError;
+    for (const step of result.steps.filter((item) => item.state !== "notExecuted")) {
+      try {
+        await historyStore.add({
+          connection_id: plan.target.connectionId,
+          connection_name: connection?.name || "",
+          database: plan.target.database,
+          sql: step.sql,
+          execution_time_ms: Date.now() - startedAt,
+          success: step.state === "committed",
+          error: step.state === "committed" ? undefined : `${step.state}: ${step.error || ""}`,
+          activity_kind: "schema_change",
+          operation: "ALTER TABLE",
+          target: plan.target.tableName,
+        });
+      } catch (error) {
+        console.warn("[DBX][structure-history:save-failed]", error);
+      }
+    }
+    if (!sameTarget() || !connectionCurrent()) return false;
+    if (result.steps.some((step) => step.state !== "notExecuted")) {
+      invalidateTableMetadataCache(plan.target);
+      await invalidateObjectMetadataCache(plan.target);
+      if (!sameTarget() || !connectionCurrent()) return false;
+      await invalidateObjectDdl(plan.target);
+      if (!sameTarget() || !connectionCurrent()) return false;
+      loadedMetadataFacets.clear();
+    }
+    if (sameTarget() && connectionCurrent()) {
+      oracleConstraintPlan.value = undefined;
+      oracleConstraintSession.value = undefined;
+      pendingStatements.value = [];
+      if (completed) {
+        const refresh = await loadStructure(true, { columns: false, indexes: true, constraints: true, foreignKeys: false, triggers: false, partitions: false, tableComment: false }, true, { forceMetadata: true, blockSecondaryMetadata: true, preserveDraft: true });
+        if (!sameTarget() || !connectionCurrent()) return false;
+        if (refresh?.error) result.readbackError = refresh.error;
+        oracleConstraintDraft.value = undefined;
+        if (!result.readbackError) {
+          syncDraftToParent();
+          emit("saved", false);
+          toast(t("structureEditor.saved"), 2500);
+        }
+      }
+    }
+    if (!completed || result.readbackError) {
+      primaryKeyResultTitle.value = "oracleStructureResult.resultTitle";
+      primaryKeyResultMessage.value = `${plan.target.schema}.${plan.target.tableName}: ${result.readbackError || t("oracleStructureResult.executionFailed")}`;
+      primaryKeyResultDetails.value = result.steps.map((step, index) => `${index + 1}. ${step.state}\n${step.sql}${step.error ? `\n${step.error}` : ""}`).join("\n\n");
+      if (result.recoverySql) primaryKeyResultDetails.value += `\n\n${t("oracleStructureResult.recoveryNotice")}\n${result.recoverySql}`;
+      if (!primaryKeyUnmounted) primaryKeyResultOpen.value = true;
+    }
+    return completed && !result.readbackError;
+  } catch (error) {
+    if (sameTarget() && connectionCurrent()) errorMessage.value = error instanceof Error ? error.message : String(error);
+    return false;
+  } finally {
+    oracleConstraintBusy.value = false;
+    saving.value = false;
+  }
+}
+
+function oracleIndexOnlyChange(): boolean {
+  if (isCreateMode.value || ddlDirty.value || oracleConstraintChanged.value || existingPrimaryKeyChanged.value) return false;
+  const scope = captureStructureRefreshScope();
+  if (!scope.indexes || scope.columns || scope.foreignKeys || scope.triggers || scope.tableComment || partitionOperations.value.length) return false;
+  return pendingStatements.value.length > 0 && pendingStatements.value.every((sql) => /^\s*(?:CREATE\s+(?:UNIQUE\s+)?INDEX|DROP\s+INDEX)\b/i.test(sql));
+}
+
+async function applyOracleIndexPlan(): Promise<boolean> {
+  const target = oracleConstraintTarget();
+  const statements = [...pendingStatements.value];
+  const draftFingerprint = JSON.stringify(indexes.value);
+  const columnsFingerprint = JSON.stringify(columns.value);
+  const baseline = oracleIndexReady.value;
+  const connectionAtStart = store.getConfig(target.connectionId);
+  const revision = store.connectionStateRevision(target.connectionId);
+  const configFingerprint = connectionAtStart ? connectionConfigFingerprint(connectionAtStart) : "";
+  if (!baseline || baseline.epoch !== oracleIndexEpoch.value || baseline.targetIdentity !== oracleIndexTargetIdentity(target) || baseline.connectionRevision !== revision || baseline.configFingerprint !== configFingerprint || baseline.columnsFingerprint !== columnsFingerprint) {
+    errorMessage.value = "Index metadata is not ready for a safe save. Refresh the complete table structure and preview again.";
+    return false;
+  }
+  const saveSessionCurrent = () =>
+    !primaryKeyUnmounted &&
+    JSON.stringify(target) === JSON.stringify(oracleConstraintTarget()) &&
+    JSON.stringify(statements) === JSON.stringify(pendingStatements.value) &&
+    draftFingerprint === JSON.stringify(indexes.value) &&
+    columnsFingerprint === JSON.stringify(columns.value) &&
+    oracleIndexOnlyChange() &&
+    store.connectionStateRevision(target.connectionId) === revision &&
+    store.isCurrentConnectionStateRevision(target.connectionId, revision) &&
+    (store.getConfig(target.connectionId) ? connectionConfigFingerprint(store.getConfig(target.connectionId)!) : "") === configFingerprint;
+  const stillCurrent = () => saveSessionCurrent() && oracleIndexReady.value === baseline && oracleIndexEpoch.value === baseline.epoch;
+  if (oracleIndexBusy.value || !oracleIndexOnlyChange() || !stillCurrent()) return false;
+  oracleIndexBusy.value = true;
+  saving.value = true;
+  const startedAt = Date.now();
+  try {
+    const plan = await prepareOracleIndexPlan(target, statements, cloneDraftValue(indexes.value), {
+      baseline,
+      columnsFingerprint,
+      indexesFingerprint: baseline.indexesFingerprint,
+    });
+    if (!stillCurrent()) return false;
+    oracleIndexPlan.value = plan;
+    const protection = productionContextForDatabase(connectionAtStart, target.database);
+    if (protection.active) {
+      const accepted = await productionSafetyStore.requestConfirmation({
+        sql: statements.join("\n"),
+        connectionName: connectionAtStart?.name,
+        database: target.database,
+        productionDatabases: protection.databases,
+        source: t("production.sourceStructure"),
+        scopeId: oracleIndexConfirmationScope,
+      });
+      if (!accepted || !stillCurrent()) return false;
+    }
+    const timeout = queryTimeoutSecsForConnection(connectionAtStart, settingsStore.editorSettings.globalQueryTimeoutSecs);
+    const result = await executeOracleIndexPlan(plan, timeout, stillCurrent);
+    if (!result) return false;
+    const attemptedSteps = result.steps.some((step) => step.state !== "notExecuted");
+    if (attemptedSteps) invalidateOracleIndexReady();
+    for (const step of result.steps.filter((item) => item.state !== "notExecuted")) {
+      try {
+        await historyStore.add({
+          connection_id: target.connectionId,
+          connection_name: connectionAtStart?.name || "",
+          database: target.database,
+          sql: step.sql,
+          execution_time_ms: Date.now() - startedAt,
+          success: step.state === "committed",
+          error: step.state === "committed" ? undefined : `${step.state}: ${step.error || ""}`,
+          activity_kind: "schema_change",
+          operation: step.sql.startsWith("CREATE") ? "CREATE INDEX" : "DROP INDEX",
+          target: target.tableName,
+        });
+      } catch (error) {
+        console.warn("[DBX][structure-history:save-failed]", error);
+      }
+    }
+    if (result.steps.some((step) => step.state !== "notExecuted")) {
+      const completedCreates = plan.mutations.flatMap((mutation, index) => {
+        if (mutation.operation !== "CREATE" || result.steps[index]?.state !== "committed") return [];
+        const created = mutation.expectedAfter.find((item) => item.name === mutation.name);
+        return created ? [created] : [];
+      });
+      oracleIndexRefreshGuard.value = { target: oracleIndexTargetIdentity(target), afterRequestId: structureLoadRequestId, completedCreates };
+      invalidateTableMetadataCache(target);
+      await invalidateObjectMetadataCache(target);
+      await invalidateObjectDdl(target);
+      loadedMetadataFacets.clear();
+    }
+    const complete = result.steps.length > 0 && result.steps.every((step) => step.state === "committed") && !result.readbackError;
+    if (saveSessionCurrent()) {
+      // Never leave a DROP in the Apply queue after partial or unknown execution.
+      pendingStatements.value = [];
+      oracleIndexPlan.value = undefined;
+      if (complete) {
+        const columnsBeforeReadback = cloneDraftValue(columns.value);
+        const indexesBeforeReadback = cloneDraftValue(indexes.value);
+        const expectedReadbackRequestId = structureLoadRequestId + 1;
+        const refresh = await loadStructure(true, { columns: false, indexes: true, constraints: false, foreignKeys: false, triggers: false, partitions: false, tableComment: true }, true, { forceMetadata: true, blockSecondaryMetadata: true });
+        if (!refresh?.error && !oracleIndexReady.value && secondaryMetadataLoading.value) {
+          await new Promise<void>((resolve) => {
+            const stop = watch(secondaryMetadataLoading, (loading) => {
+              if (!loading) {
+                stop();
+                resolve();
+              }
+            });
+            if (!secondaryMetadataLoading.value) {
+              stop();
+              resolve();
+            }
+          });
+        }
+        const readback = oracleIndexReady.value;
+        const currentConfig = store.getConfig(target.connectionId);
+        const contextStillCurrent = !primaryKeyUnmounted && JSON.stringify(target) === JSON.stringify(oracleConstraintTarget()) && store.connectionStateRevision(target.connectionId) === revision && (currentConfig ? connectionConfigFingerprint(currentConfig) : "") === configFingerprint;
+        const readbackReady =
+          !!readback &&
+          contextStillCurrent &&
+          !refresh?.error &&
+          !secondaryMetadataErrors.value.indexes &&
+          !errorMessage.value &&
+          readback.requestId === structureLoadRequestId &&
+          readback.requestId >= expectedReadbackRequestId &&
+          readback.epoch === oracleIndexEpoch.value &&
+          readback.targetIdentity === oracleIndexTargetIdentity(target) &&
+          readback.connectionRevision === store.connectionStateRevision(target.connectionId) &&
+          readback.configFingerprint === (currentConfig ? connectionConfigFingerprint(currentConfig) : "");
+        if (readbackReady) {
+          emit("saved", false);
+        } else {
+          if (structureLoadRequestId === expectedReadbackRequestId && contextStillCurrent) {
+            columns.value = columnsBeforeReadback;
+            indexes.value = indexesBeforeReadback;
+          }
+          result.readbackError = refresh?.error || secondaryMetadataErrors.value.indexes || errorMessage.value || "Index refresh did not publish a current complete baseline after DDL.";
+        }
+      }
+    }
+    if ((!complete || result.readbackError) && !primaryKeyUnmounted) {
+      primaryKeyResultTitle.value = "oracleStructureResult.resultTitle";
+      primaryKeyResultMessage.value = `${target.schema}.${target.tableName}: ${t("oracleStructureResult.executionFailed")}`;
+      primaryKeyResultDetails.value = result.steps.map((step, index) => `${index + 1}. ${step.state}\n${step.sql}${step.error ? `\n${step.error}` : ""}`).join("\n\n");
+      if (result.readbackError) primaryKeyResultDetails.value += `\n\n${t("oracleStructureResult.readbackFailed")}: ${result.readbackError}`;
+      if (!primaryKeyUnmounted) primaryKeyResultOpen.value = true;
+    }
+    return complete && !result.readbackError;
+  } catch (error) {
+    if (saveSessionCurrent()) {
+      pendingStatements.value = [];
+      oracleIndexPlan.value = undefined;
+      errorMessage.value = error instanceof Error ? error.message : String(error);
+    }
+    return false;
+  } finally {
+    oracleIndexBusy.value = false;
+    saving.value = false;
+  }
+}
+
+async function applyOracleForeignKeyCreatePlan(): Promise<boolean> {
+  if (oracleForeignKeyBusy.value || !newOracleForeignKeyPlan.value || !newOracleForeignKeySession.value) return false;
+  const plan = cloneDraftValue(newOracleForeignKeyPlan.value);
+  const plannedSession = newOracleForeignKeySession.value;
+  const identity = JSON.stringify(plan.target);
+  const changes = JSON.stringify(oracleForeignKeyChanges());
+  const connectionAtStart = store.getConfig(plan.target.connectionId);
+  const sameTarget = () => !primaryKeyUnmounted && identity === JSON.stringify({ ...primaryKeyTarget(), schema: metadataSchema.value, tableName: newTableName.value.trim(), databaseType: plan.target.databaseType });
+  const connectionCurrent = () =>
+    store.connectionStateRevision(plan.target.connectionId) === plannedSession.revision &&
+    store.isCurrentConnectionStateRevision(plan.target.connectionId, plannedSession.revision) &&
+    (store.getConfig(plan.target.connectionId) ? connectionConfigFingerprint(store.getConfig(plan.target.connectionId)!) : "") === plannedSession.configFingerprint;
+  const currentOptions = () => ({ ...structureChangeOptions(), schema: metadataSchema.value, tableName: newTableName.value.trim(), foreignKeys: [], oracleForeignKeyChanges: oracleForeignKeyChanges() });
+  const currentPartitioning = () => (createPartitioningEnabled.value ? { kind: createPartitioningKind.value, columns: createPartitioningColumns.value, expression: createPartitioningExpression.value } : undefined);
+  const canStart = () => sameTarget() && changes === JSON.stringify(oracleForeignKeyChanges()) && JSON.stringify({ options: currentOptions(), changes: oracleForeignKeyChanges(), partitioning: currentPartitioning() }) === plannedSession.draftFingerprint && isCreateMode.value;
+  const stillCurrent = () => canStart() && connectionCurrent();
+  if (!stillCurrent()) return false;
+  oracleForeignKeyBusy.value = true;
+  saving.value = true;
+  const startedAt = Date.now();
+  try {
+    const protection = productionContextForDatabase(connectionAtStart, plan.target.database);
+    if (protection.active) {
+      const accepted = await productionSafetyStore.requestConfirmation({
+        sql: plan.statements.join("\n"),
+        connectionName: connectionAtStart?.name,
+        database: plan.target.database,
+        productionDatabases: protection.databases,
+        source: t("production.sourceStructure"),
+        scopeId: oracleForeignKeyConfirmationScope,
+      });
+      if (!accepted || !stillCurrent()) return false;
+    }
+    const timeout = queryTimeoutSecsForConnection(connectionAtStart, settingsStore.editorSettings.globalQueryTimeoutSecs);
+    const result = await executeOracleForeignKeyCreatePlan(plan, timeout, { canStart, connectionCurrent });
+    if (!result) return false;
+    for (const step of result.steps.filter((item) => item.state !== "notExecuted")) {
+      try {
+        await historyStore.add({
+          connection_id: plan.target.connectionId,
+          connection_name: connectionAtStart?.name || "",
+          database: plan.target.database,
+          sql: step.sql,
+          execution_time_ms: Date.now() - startedAt,
+          success: step.state === "committed",
+          error: step.state === "committed" ? undefined : `${t(`oceanbasePrimaryKey.${step.state}`)}: ${step.error || ""}`,
+          activity_kind: "schema_change",
+          operation: step.sql.startsWith("CREATE ") ? "CREATE TABLE" : "ALTER TABLE",
+          target: plan.target.tableName,
+        });
+      } catch (error) {
+        console.warn("[DBX][structure-history:save-failed]", error);
+      }
+    }
+    if (!connectionCurrent()) return false;
+    const created = result.steps[0]?.state === "committed" || result.tableExists === true;
+    const issues = [
+      ...result.steps.filter((step) => step.state === "rejected" || step.state === "unknown").map((step) => `${step.state}: ${step.error || step.sql}`),
+      ...(result.readbackError ? [result.readbackError] : []),
+      ...(result.steps.some((step) => step.state === "notExecuted") ? [t("oracleForeignKey.executionFailed")] : []),
+    ];
+    if (created) {
+      const stepDetails = result.steps.map((step, index) => `${index + 1}. ${t(`oceanbasePrimaryKey.${step.state}`)}: ${step.sql}${step.error ? `\n${step.error}` : ""}`).join("\n");
+      const details = [
+        t("oracleForeignKey.createdTablePartial"),
+        `${plan.target.schema}.${foldCreatedTableName(plan.target.tableName, plan.target.databaseType)}`,
+        stepDetails,
+        ...(result.readbackError ? [`${t("oracleForeignKey.readbackFailed")}: ${result.readbackError}`] : []),
+        ...(issues.length ? [t("oracleForeignKey.createRecoveryNotice")] : []),
+      ]
+        .filter(Boolean)
+        .join("\n\n");
+      const createdName = foldCreatedTableName(plan.target.tableName, plan.target.databaseType);
+      for (const object of [{ ...plan.target, tableName: createdName }, ...plan.changes.map((change) => ({ ...plan.target, schema: change.target!.refSchema, tableName: change.target!.refTable }))]) {
+        invalidateTableMetadataCache(object);
+        await invalidateObjectMetadataCache(object);
+        await invalidateObjectDdl(object);
+      }
+      if (!sameTarget()) {
+        toast(`${t("oracleForeignKey.executionFailed")}\n${details}`, 10000);
+        return false;
+      }
+      if (!connectionCurrent()) return false;
+      newOracleForeignKeyPlan.value = undefined;
+      newOracleForeignKeySession.value = undefined;
+      pendingStatements.value = [];
+      warnings.value = [];
+      const fkSteps = result.steps.filter((step) => step.sql.includes("FOREIGN KEY"));
+      const sameDefinition = (actual: NonNullable<(typeof plan.changes)[number]["target"]>, expected: NonNullable<(typeof plan.changes)[number]["target"]>) => {
+        const fold = (name: string) => (plan.target.databaseType === "oracle" ? foldCreatedTableName(name, plan.target.databaseType) : name);
+        const selfReference = fold(expected.refSchema) === fold(plan.target.schema) && fold(expected.refTable) === fold(plan.target.tableName);
+        return (
+          JSON.stringify(actual) ===
+          JSON.stringify({
+            ...expected,
+            name: fold(expected.name),
+            columns: expected.columns.map(fold),
+            ...(selfReference ? { refSchema: fold(expected.refSchema), refTable: fold(expected.refTable), refColumns: expected.refColumns.map(fold) } : {}),
+          })
+        );
+      };
+      const remaining = plan.changes.flatMap((change, index) => {
+        const step = fkSteps[index];
+        const target = change.target!;
+        const exists = result.readbackDefinitions?.some((definition) => sameDefinition(definition, target));
+        if (exists || (step?.state !== "rejected" && step?.state !== "notExecuted")) return [];
+        const fold = (name: string) => foldCreatedTableName(name, plan.target.databaseType);
+        const selfReference = fold(target.refSchema) === fold(plan.target.schema) && fold(target.refTable) === fold(plan.target.tableName);
+        return [
+          {
+            ...target,
+            name: fold(target.name),
+            columns: target.columns.map(fold),
+            ...(selfReference ? { refSchema: fold(target.refSchema), refTable: fold(target.refTable), refColumns: target.refColumns.map(fold) } : {}),
+          },
+        ];
+      });
+      const uncertainSteps = result.steps.filter((step) => step.state === "unknown").map((step) => (step.sql.startsWith("CREATE TABLE") ? "CREATE" : step.sql));
+      if (issues.length) {
+        const recovery = { tableName: createdName, tableExists: true, details, remaining, uncertainSteps };
+        oracleForeignKeyCreateRecovery.value = recovery;
+        const recoveryDraft = {
+          ...createCurrentDraft(),
+          dirty: remaining.length > 0,
+          activeTab: "foreignKeys" as TableStructureEditorDraft["activeTab"],
+          newTableName: "",
+          tableComment: tableComment.value,
+          originalTableComment: tableComment.value,
+          columns: [],
+          indexes: [],
+          foreignKeys: [],
+          constraints: [],
+          constraintsLoaded: false,
+          triggers: [],
+          triggersLoaded: false,
+          partitionOperations: [],
+          createPartitioningEnabled: false,
+          createPartitioningColumns: [],
+          createPartitioningExpression: "",
+          loadedMetadataFacets: [],
+          existingPrimaryKey: undefined,
+          oracleConstraintChange: undefined,
+          oracleForeignKeyCreateRecovery: recovery,
+          ddlDraft: null,
+        } satisfies TableStructureEditorDraft;
+        emitDraftToParent(recoveryDraft);
+        emit("saved", false, createdName);
+        primaryKeyResultDetails.value = details;
+        primaryKeyResultTitle.value = "oracleForeignKey.resultTitle";
+        primaryKeyResultMessage.value = `${plan.target.schema}.${createdName}: ${t("oracleForeignKey.createdTablePartial")}`;
+        if (!primaryKeyUnmounted) primaryKeyResultOpen.value = true;
+        else toast(`${primaryKeyResultMessage.value}\n${details}`, 10000);
+        return false;
+      }
+      primaryKeyResultDetails.value = details;
+      oracleForeignKeyCreateRecovery.value = undefined;
+      clearDraft();
+      emit("saved", tableComment.value !== originalTableComment.value, createdName);
+      toast(t("structureEditor.created"), 2500);
+      return issues.length === 0;
+    }
+    if (sameTarget() && connectionCurrent()) {
+      errorMessage.value = issues.join("\n") || t("oracleForeignKey.executionFailed");
+      newOracleForeignKeyPlan.value = undefined;
+      newOracleForeignKeySession.value = undefined;
+      pendingStatements.value = [];
+      if (result.steps[0]?.state === "unknown") {
+        const recovery = {
+          tableName: foldCreatedTableName(plan.target.tableName, plan.target.databaseType),
+          tableExists: false,
+          details: [...issues, ...result.steps.map((step) => `${step.state}: ${step.sql}${step.error ? `\n${step.error}` : ""}`)].join("\n\n"),
+          remaining: [],
+          uncertainSteps: ["CREATE"],
+        };
+        oracleForeignKeyCreateRecovery.value = recovery;
+        emitDraftToParent({ ...createCurrentDraft(), oracleForeignKeyCreateRecovery: recovery });
+        primaryKeyResultTitle.value = "oracleForeignKey.resultTitle";
+        primaryKeyResultMessage.value = `${plan.target.schema}.${recovery.tableName}: ${t("oracleForeignKey.readbackFailed")}`;
+        primaryKeyResultDetails.value = recovery.details;
+        primaryKeyResultOpen.value = true;
+      }
+    }
+    return false;
+  } catch (error) {
+    if (sameTarget() && connectionCurrent()) errorMessage.value = error instanceof Error ? error.message : String(error);
+    return false;
+  } finally {
+    oracleForeignKeyBusy.value = false;
+    saving.value = false;
+  }
+}
+
 async function applyChanges() {
   if (!canApply.value || !props.connectionId || !props.database) return false;
+  if (oracleIndexRefreshGuard.value?.target === oracleIndexTargetIdentity(oracleConstraintTarget())) {
+    errorMessage.value = "Index execution may have changed the database. Refresh index metadata before applying again.";
+    return false;
+  }
+  const oracleIndexMutation = !isCreateMode.value && (databaseType.value === "oracle" || databaseType.value === "oceanbase-oracle") && indexes.value.some(indexChanged);
+  if (oracleIndexMutation && !oracleIndexOnlyChange()) {
+    errorMessage.value = t("oracleIndex.mixedDraft");
+    return false;
+  }
+  if (existingPrimaryKeyChanged.value) return applyExistingPrimaryKey();
+  if (oracleConstraintPlan.value) return applyOracleConstraintPlan();
+  if (oracleIndexMutation) return applyOracleIndexPlan();
+  if (newOracleForeignKeyPlan.value) return applyOracleForeignKeyCreatePlan();
+  if (existingOracleForeignKeyPlan.value) return applyOracleForeignKeyPlan();
   // Layer B runtime guard: a stale `concurrently: true` whose availability is
   // no longer enabled must never be executed — reject the save with an
   // explicit error even if normalization was skipped (race / non-UI caller).
@@ -5046,6 +6654,7 @@ async function applyChanges() {
     return false;
   }
   const sql = previewSqlText.value;
+  const submittedStarRocksTarget = starrocksStatusTarget.value;
   const connection = store.getConfig(props.connectionId);
   const productionContext = productionContextForDatabase(connection, props.database);
   if (productionContext.active) {
@@ -5059,11 +6668,13 @@ async function applyChanges() {
     if (!confirmed) return false;
   }
   saving.value = true;
+  if (databaseType.value === "starrocks") starrocksSubmittedSql.value = undefined;
   errorMessage.value = "";
   // A hand-written DDL script can change anything about the table, and the
   // structure draft it was applied from is clean, so the change-derived scope
   // would be empty: reload every facet instead of leaving the tabs stale.
   const refreshScope = ddlDirty.value ? { columns: true, indexes: true, foreignKeys: true, constraints: true, triggers: true, partitions: true, tableComment: true } : captureStructureRefreshScope();
+  const starrocksPhysicalOrderChanged = !ddlDirty.value && databaseType.value === "starrocks" && structureCapabilities.value.reorderColumn && columns.value.some((column, index) => column.original && column.originalPosition !== index);
   // Plan A guard: concurrent builds only run with a long-enough query timeout
   // (a cancelled build leaves an INVALID index behind), and are blocked
   // up-front when a same-name INVALID index already exists.
@@ -5113,6 +6724,7 @@ async function applyChanges() {
       hasSqliteTypeChange.value && !ddlDirty.value
         ? await api.applySqliteTableStructureChange(props.connectionId, props.database, structureChangeOptions(), sqliteSchemaRevision.value!)
         : await api.executeBatch(props.connectionId, props.database, pendingStatements.value, props.schema, executionTimeoutSecs, useTransaction);
+    if (databaseType.value === "starrocks") starrocksSubmittedSql.value = { target: submittedStarRocksTarget, sql };
     await recordStructureHistory(sql, startedAt, true, result);
     if (!isCreateMode.value && props.tableName) {
       const metadataMatch = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName };
@@ -5121,7 +6733,7 @@ async function applyChanges() {
       await invalidateObjectDdl(ddlRequest());
       loadedMetadataFacets.clear();
     }
-    toast(t(isCreateMode.value ? "structureEditor.created" : "structureEditor.saved"), 2500);
+    toast(t(isCreateMode.value ? "structureEditor.created" : databaseType.value === "starrocks" && refreshScope.columns ? "starrocksLayout.alterSubmitted" : "structureEditor.saved"), 4000);
     sqlPreviewPending.value = false;
     sqlPreviewLoading.value = false;
     pendingStatements.value = [];
@@ -5130,6 +6742,10 @@ async function applyChanges() {
     // Partition operations are applied in place; drop them now so the reload
     // below reflects the new catalog state instead of replaying them.
     partitionOperations.value = [];
+    if (databaseType.value === "starrocks") {
+      starrocksAlterContext.value = undefined;
+      starrocksSortColumns.value = undefined;
+    }
     ddlFetched.value = false;
     rawDdlContent.value = "";
     ddlDraft.value = null;
@@ -5141,6 +6757,12 @@ async function applyChanges() {
       // exact spelling — mirror the DDL generator's quoting rule here.
       emit("saved", tableComment.value !== originalTableComment.value, foldCreatedTableName(newTableName.value, databaseType.value));
     } else {
+      // An old local-only preference must not mask the newly submitted schema order.
+      if (starrocksPhysicalOrderChanged) {
+        const scopeKey = localTableColumnOrderScopeKey();
+        removeTableDataGridColumnOrder(scopeKey);
+        notifyTableDataGridColumnOrderChanged(scopeKey);
+      }
       // Refresh persisted keys after successful renames/additions before metadata reloads.
       persistLocalColumnOrder(false);
       saving.value = false;
@@ -5155,11 +6777,39 @@ async function applyChanges() {
     // A cancelled/errored concurrent build leaves a same-name INVALID index
     // behind; surface that so retries are not silently doomed.
     const invalidIndexHint = hasConcurrentIndexBuild && /already exists/i.test(rawMessage) ? `\n\n${t("structureEditor.invalidIndexRetryHint")}` : "";
-    errorMessage.value = `${rawMessage}${invalidIndexHint}`;
-    await recordStructureHistory(sql, startedAt, false, undefined, errorMessage.value);
+    const starrocksSchemaChangeBusy = databaseType.value === "starrocks" && /a schema change operation is in progress on the table\b/i.test(rawMessage);
+    errorMessage.value = starrocksSchemaChangeBusy ? t("starrocksLayout.schemaChangeBusy", { table: props.tableName }) : `${rawMessage}${invalidIndexHint}`;
+    await recordStructureHistory(sql, startedAt, false, undefined, starrocksSchemaChangeBusy ? rawMessage : errorMessage.value);
     return false;
   } finally {
     saving.value = false;
+    if (databaseType.value === "starrocks") starrocksStatusRevision.value++;
+  }
+}
+
+async function onStarRocksAlterCompleted() {
+  if (saving.value || loading.value || starrocksDraftDirty.value) return;
+  const requestId = structureLoadRequestId;
+  const target = JSON.stringify([props.connectionId, props.database, props.tableName, props.schema, props.catalog]);
+  const metadataRequest = { connectionId: props.connectionId, database: props.database, schema: metadataSchema.value, tableName: props.tableName!, catalog: props.catalog };
+  try {
+    invalidateTableMetadataCache(metadataRequest);
+    await Promise.all([invalidateObjectMetadataCache(metadataRequest), invalidateObjectDdl(ddlRequest())]);
+    const [nextColumns, ddlResult] = await Promise.all([api.getColumns(props.connectionId, props.database, metadataSchema.value, props.tableName!, props.catalog), loadObjectDdl(ddlRequest(), { force: true })]);
+    const formatted = await formatStructureDdl(ddlResult.ddl);
+    // Editing while the fetch is in flight must preserve the new draft.
+    if (requestId !== structureLoadRequestId || target !== JSON.stringify([props.connectionId, props.database, props.tableName, props.schema, props.catalog]) || saving.value || loading.value || starrocksDraftDirty.value) return;
+    columns.value = applyStoredLocalColumnOrder(createColumnDrafts(nextColumns, databaseType.value));
+    starrocksAlterContext.value = starRocksAlterOptionsFromDdl(ddlResult.ddl, connection.value?.database_info?.productVersion);
+    starrocksSortColumns.value = [...(starrocksAlterContext.value.sortColumns ?? [])];
+    rawDdlContent.value = formatted;
+    ddlFetched.value = true;
+    scheduleSqlPreviewRefresh();
+    syncDraftToParent();
+    skipNextRefreshVersion = true;
+    emit("saved", false);
+  } catch {
+    toast(t("starrocksStatus.structureRefreshFailed"), 5000);
   }
 }
 
@@ -5363,6 +7013,7 @@ onActivated(() => {
   if (activeTab.value === "ddl") scheduleDdlEditorInit();
 });
 onDeactivated(() => {
+  copyColumnsDialogOpen.value = false;
   flushStructureScrollDraftSync();
   if (structureColumnScrollingTimer) clearTimeout(structureColumnScrollingTimer);
   structureColumnScrollingTimer = undefined;
@@ -5374,6 +7025,9 @@ onDeactivated(() => {
   destroyDdlEditor();
 });
 onBeforeUnmount(() => {
+  ++copySourceScopeRequestId;
+  resetCopySourceTables();
+  structureLoadRequestId++;
   flushStructureScrollDraftSync();
   if (structureColumnScrollingTimer) clearTimeout(structureColumnScrollingTimer);
   structureColumnScrollingTimer = undefined;
@@ -5493,6 +7147,8 @@ watch([() => props.connectionId, () => props.database, databaseType], () => {
   void loadDynamicDataTypeOptions();
 });
 
+watch(() => connection.value?.database_info?.productVersion, scheduleSqlPreviewRefresh);
+
 watch(
   [
     isCreateMode,
@@ -5511,11 +7167,15 @@ watch(
     mysqlTableEngine,
     originalMysqlTableEngine,
     physicalOptions,
+    starrocksPhysicalOptions,
+    starrocksSortColumns,
     mysqlTableEngineLoading,
     mysqlTableEngineLoadError,
     mysqlTableDefaultCollation,
     tableOwner,
     ddlDraft,
+    existingPrimaryKeyDraft,
+    oracleConstraintDraft,
     columns,
     indexes,
     foreignKeys,
@@ -5641,6 +7301,28 @@ watch(
 
 <template>
   <div ref="rootRef" class="flex h-full min-h-0 flex-col gap-2 overflow-hidden p-[var(--structure-shell-padding)] text-[length:var(--structure-font-size)]" :data-structure-density="localStructureDensity" :style="structureDensityStyle">
+    <DangerConfirmDialog v-model:open="primaryKeyResultOpen" :title="t(primaryKeyResultTitle)" :message="primaryKeyResultMessage" :confirm-label="t('common.close')">
+      <template #options>
+        <details class="rounded border p-2 text-xs">
+          <summary class="cursor-pointer">{{ t("oceanbasePrimaryKey.details") }}</summary>
+          <Button variant="ghost" size="sm" @click="copyColumnNamesText(primaryKeyResultDetails)">{{ t("dangerDialog.copyFullText") }}</Button>
+          <pre data-native-clipboard class="max-h-72 overflow-auto whitespace-pre-wrap break-all">{{ primaryKeyResultDetails }}</pre>
+        </details>
+      </template>
+    </DangerConfirmDialog>
+    <StarRocksLayoutCopyDialog
+      v-if="!isCreateMode && databaseType === 'starrocks' && props.tableName"
+      v-model:open="starrocksLayoutCopyOpen"
+      :connection-id="props.connectionId"
+      :database="props.database"
+      :schema="props.schema"
+      :catalog="props.catalog"
+      :table-name="props.tableName"
+      :server-version="connection?.database_info?.productVersion"
+      :timeout-secs="queryTimeoutSecsForConnection(connection, settingsStore.editorSettings.globalQueryTimeoutSecs)"
+      :authorize="authorizeStarRocksLayoutCopy"
+      @created="emit('saved', false)"
+    />
     <div class="flex shrink-0 items-center gap-2 rounded-md border bg-muted/20 px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]">
       <Database :class="[structureIconClass, 'text-muted-foreground']" />
       <span class="min-w-0 flex-1 truncate font-medium">{{ targetLabel || t("editor.noDatabase") }}</span>
@@ -5651,6 +7333,21 @@ watch(
       </Button>
     </div>
 
+    <StarRocksAlterStatus
+      v-if="!isCreateMode && databaseType === 'starrocks' && props.tableName"
+      :connection-id="props.connectionId"
+      :database="props.database"
+      :table-name="props.tableName"
+      :schema="metadataSchema"
+      :catalog="props.catalog"
+      :paused="saving || loading || postSaveRefreshing"
+      :revision="starrocksStatusRevision"
+      :dirty="starrocksDraftDirty"
+      :submitted-sql="starrocksSubmittedSql?.target === starrocksStatusTarget ? starrocksSubmittedSql.sql : undefined"
+      @busy="starrocksStatusBusy = $event"
+      @completed="onStarRocksAlterCompleted"
+    />
+
     <div v-if="isCreateMode" class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.tableName") }}</label>
       <Input v-model="newTableName" :placeholder="t('contextMenu.duplicateNamePlaceholder')" :class="[structureControlClass, 'max-w-[220px]']" />
@@ -5658,7 +7355,7 @@ watch(
 
     <div class="flex shrink-0 items-center gap-2">
       <label class="shrink-0 font-medium text-muted-foreground">{{ t("structureEditor.comment") }}</label>
-      <Input v-model="tableComment" :placeholder="t('structureEditor.tableCommentPlaceholder')" :class="[structureControlClass, 'max-w-[320px]']" :disabled="isTableCommentDisabled" />
+      <Input v-model="tableComment" :placeholder="t('structureEditor.tableCommentPlaceholder')" :class="[structureControlClass, 'max-w-[320px]']" :disabled="isTableCommentDisabled" data-table-comment-input />
       <Tooltip v-if="isTableCommentDisabled">
         <TooltipTrigger as-child>
           <Info :class="[structureIconClass, 'shrink-0 text-muted-foreground']" />
@@ -5818,6 +7515,18 @@ watch(
                 </TooltipTrigger>
                 <TooltipContent side="bottom" class="font-mono font-medium" data-add-column-shortcut-content>Shift+Enter</TooltipContent>
               </Tooltip>
+              <Button
+                v-if="activeTab === 'columns' && !isCreateMode && databaseType === 'starrocks'"
+                variant="outline"
+                size="sm"
+                :class="structureToolbarButtonClass"
+                :disabled="loading || saving || hasPendingStructureChanges() || ddlDirty"
+                :title="hasPendingStructureChanges() || ddlDirty ? t('starrocksLayout.copySaveFirst') : undefined"
+                @click="starrocksLayoutCopyOpen = true"
+                data-starrocks-layout-copy-button
+              >
+                <SlidersHorizontal :class="structureIconClass" />{{ t("starrocksLayout.copyButton") }}
+              </Button>
               <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="openCopyColumnsDialog">
                 <Copy :class="structureIconClass" />
                 {{ t("structureEditor.copyColumns") }}
@@ -5826,11 +7535,11 @@ watch(
                 <ClipboardList :class="structureIconClass" />
                 {{ t("grid.copyColumnNames") }}
               </Button>
-              <Button v-if="isCreateMode && activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="applyColumnTemplate(PRESET_FIELDS_TEMPLATE_ID)">
+              <Button v-if="activeTab === 'columns'" size="sm" variant="outline" :class="structureToolbarButtonClass" :disabled="!canAddColumn" @click="applyColumnTemplate(PRESET_FIELDS_TEMPLATE_ID)">
                 <Copy :class="structureIconClass" />
                 {{ t("structureEditor.columnTemplates") }}
               </Button>
-              <Tooltip v-if="isCreateMode && activeTab === 'columns'">
+              <Tooltip v-if="activeTab === 'columns'">
                 <TooltipTrigger as-child>
                   <Button size="sm" variant="ghost" :class="structureToolbarButtonClass" :disabled="!canAddColumn" :aria-label="t('structureEditor.configureColumnTemplates')" @click="emit('openSettings', 'data', 'tableColumnTemplates')">
                     <Settings :class="structureIconClass" />
@@ -5859,6 +7568,10 @@ watch(
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addForeignKey") }}
               </Button>
+              <template v-if="activeTab === 'constraints' && isOracleConstraintEditor">
+                <Button size="sm" :class="structureToolbarButtonClass" :disabled="saving || oracleConstraintBusy || !!oracleConstraintDraft" @click="addOracleConstraint('check')"><Plus :class="structureIconClass" />{{ t("structureEditor.addCheckConstraint") }}</Button>
+                <Button size="sm" :class="structureToolbarButtonClass" :disabled="saving || oracleConstraintBusy || !!oracleConstraintDraft" @click="addOracleConstraint('unique')"><Plus :class="structureIconClass" />{{ t("structureEditor.addUniqueConstraint") }}</Button>
+              </template>
               <Button v-if="activeTab === 'triggers'" size="sm" :class="structureToolbarButtonClass" :disabled="!canEditTriggers || triggersLoading" @click="addTrigger">
                 <Plus :class="structureIconClass" />
                 {{ t("structureEditor.addTrigger") }}
@@ -6136,7 +7849,7 @@ watch(
                                 </Button>
                               </DropdownMenuTrigger>
                               <DropdownMenuContent align="end" class="max-h-56 w-max min-w-36 max-w-[calc(100vw-1rem)] overflow-y-auto">
-                                <DropdownMenuItem v-for="preset in defaultValuePresets" :key="preset.value" @click="column.defaultValue = preset.value">
+                                <DropdownMenuItem v-for="preset in columnDefaultValuePresets(column)" :key="preset.value" @click="column.defaultValue = preset.value">
                                   <code :class="['structure-data-type-option block truncate font-mono text-[length:var(--structure-font-size)]', structureDefaultValueToneClass(preset.value, preset.dataType)]">{{ preset.label }}</code>
                                 </DropdownMenuItem>
                               </DropdownMenuContent>
@@ -6469,6 +8182,16 @@ watch(
                         data-index-name-input
                         @update:model-value="(value: string | number) => onIndexNameInput(index, value)"
                       />
+                      <Button
+                        v-if="canOpenPairedOracleConstraint(index)"
+                        variant="ghost"
+                        size="icon"
+                        :disabled="saving || oracleConstraintBusy || !!oracleConstraintDraft"
+                        :aria-label="`Edit unique constraint ${index.name}`"
+                        :data-paired-unique-constraint="index.name"
+                        @click="editOracleUniqueConstraintForIndex(index)"
+                        >{{ t("common.edit") }}</Button
+                      >
                       <LightTooltip v-if="!index.isPrimary" :text="t('structureEditor.regenerateIndexName')" side="top" nowrap>
                         <Button
                           type="button"
@@ -6593,12 +8316,15 @@ watch(
               <div v-for="fk in foreignKeys" :key="fk.id" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="fk.markedForDrop ? 'bg-destructive/5 opacity-60' : ''">
                 <div class="grid grid-cols-[minmax(110px,1fr)_minmax(110px,1fr)_minmax(110px,1fr)_minmax(90px,0.8fr)_minmax(90px,0.8fr)_auto] gap-1.5">
                   <Input v-model="fk.name" :class="structureControlClass" :placeholder="t('structureEditor.foreignKeyName')" :disabled="!canEditForeignKeyDraft(fk)" />
-                  <Input v-model="fk.column" :class="structureControlClass" :placeholder="t('structureEditor.columnName')" :disabled="!canEditForeignKeyDraft(fk)" />
-                  <Input v-model="fk.refTable" :class="structureControlClass" :placeholder="t('structureEditor.referencedTable')" :disabled="!canEditForeignKeyDraft(fk)" />
-                  <Input v-model="fk.refColumn" :class="structureControlClass" :placeholder="t('structureEditor.referencedColumn')" :disabled="!canEditForeignKeyDraft(fk)" />
-                  <Input v-model="fk.refSchema" :class="structureControlClass" :placeholder="t('structureEditor.referencedSchema')" :disabled="!canEditForeignKeyDraft(fk)" />
+                  <Input v-if="!isOracleForeignKeyEditor" v-model="fk.column" :class="structureControlClass" :placeholder="t('structureEditor.columnName')" :disabled="!canEditForeignKeyDraft(fk)" />
+                  <Input v-if="!isOracleForeignKeyEditor" v-model="fk.refTable" :class="structureControlClass" :placeholder="t('structureEditor.referencedTable')" :disabled="!canEditForeignKeyDraft(fk)" />
+                  <Input v-else :model-value="fk.refTable" :class="structureControlClass" :placeholder="t('structureEditor.referencedTable')" :disabled="!canEditForeignKeyDraft(fk)" @update:model-value="(value) => setOracleForeignKeyTarget(fk, value, false)" />
+                  <Input v-if="!isOracleForeignKeyEditor" v-model="fk.refColumn" :class="structureControlClass" :placeholder="t('structureEditor.referencedColumn')" :disabled="!canEditForeignKeyDraft(fk)" />
+                  <Input v-if="!isOracleForeignKeyEditor" v-model="fk.refSchema" :class="structureControlClass" :placeholder="t('structureEditor.referencedSchema')" :disabled="!canEditForeignKeyDraft(fk)" />
+                  <Input v-else :model-value="fk.refSchema" :class="structureControlClass" :placeholder="t('structureEditor.referencedSchema')" :disabled="!canEditForeignKeyDraft(fk)" @update:model-value="(value) => setOracleForeignKeyTarget(fk, value, true)" />
                   <div class="flex items-center justify-end gap-1">
-                    <Button v-if="fk.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" @click="toggleDropForeignKey(fk)">
+                    <Button v-if="isOracleForeignKeyEditor && fk.original && !fk.oracleOriginal" data-oracle-foreign-key-edit variant="ghost" size="sm" :disabled="foreignKeyDefinitionBusy || foreignKeysLoading || saving" @click="editOracleForeignKey(fk)">{{ t("common.edit") }}</Button>
+                    <Button v-if="fk.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" :disabled="isOracleForeignKeyEditor && (!fk.oracleOriginal || foreignKeyDefinitionBusy || saving)" @click="toggleDropForeignKey(fk)">
                       <Trash2 :class="structureIconClass" />
                       {{ fk.markedForDrop ? t("structureEditor.restore") : t("structureEditor.drop") }}
                     </Button>
@@ -6608,16 +8334,83 @@ watch(
                     </Button>
                   </div>
                 </div>
+                <div v-if="isOracleForeignKeyEditor" class="mt-1.5 space-y-1">
+                  <div v-for="(column, position) in fk.columns" :key="position" data-oracle-foreign-key-pair class="flex items-center gap-1">
+                    <Select :model-value="column || undefined" :disabled="!canEditForeignKeyDraft(fk)" @update:model-value="(value) => setOracleForeignKeyPair(fk, position, value, true)">
+                      <SelectTrigger class="min-w-0 flex-1"><SelectValue :placeholder="t('structureEditor.columnName')" /></SelectTrigger>
+                      <SelectContent
+                        ><SelectItem v-for="source in columns.filter((item) => !item.markedForDrop)" :key="source.id" :value="source.name">{{ source.name }}</SelectItem></SelectContent
+                      >
+                    </Select>
+                    <Input
+                      :model-value="fk.refColumns?.[position] ?? ''"
+                      :list="foreignKeyReferenceListId(fk)"
+                      data-oracle-foreign-key-reference
+                      :placeholder="t('structureEditor.referencedColumn')"
+                      :disabled="!canEditForeignKeyDraft(fk)"
+                      @update:model-value="(value) => setOracleForeignKeyPair(fk, position, value, false)"
+                    />
+                    <Button variant="ghost" size="icon-xs" data-oracle-foreign-key-up :title="t('oceanbasePrimaryKey.moveUp')" :disabled="!canEditForeignKeyDraft(fk) || position === 0" @click="moveOracleForeignKeyPair(fk, position, -1)"><ChevronUp class="h-4 w-4" /></Button>
+                    <Button variant="ghost" size="icon-xs" data-oracle-foreign-key-down :title="t('oceanbasePrimaryKey.moveDown')" :disabled="!canEditForeignKeyDraft(fk) || position === (fk.columns?.length ?? 0) - 1" @click="moveOracleForeignKeyPair(fk, position, 1)"
+                      ><ChevronDown class="h-4 w-4"
+                    /></Button>
+                    <Button variant="ghost" size="icon-xs" :title="t('common.delete')" :disabled="!canEditForeignKeyDraft(fk)" @click="removeOracleForeignKeyPair(fk, position)"><X class="h-4 w-4" /></Button>
+                  </div>
+                  <Button variant="outline" size="sm" :disabled="!canEditForeignKeyDraft(fk)" @click="addOracleForeignKeyPair(fk)">{{ t("structureEditor.addColumn") }}</Button>
+                  <datalist :id="foreignKeyReferenceListId(fk)"><option v-for="choice in foreignKeyReferenceColumns[fk.id] ?? []" :key="choice.name" :value="choice.name" /></datalist>
+                  <div v-if="fk.oracleState" class="flex flex-wrap gap-3" data-oracle-foreign-key-state>
+                    <label class="flex items-center gap-1"
+                      ><input type="checkbox" data-oracle-foreign-key-enabled :class="structureCheckboxClass" :checked="fk.oracleState.enabled" :disabled="!canEditForeignKeyDraft(fk)" @change="setOracleForeignKeyState(fk, 'enabled', ($event.target as HTMLInputElement).checked)" />{{
+                        t("grid.tableInfoConstraintEnabled")
+                      }}</label
+                    >
+                    <label class="flex items-center gap-1"
+                      ><input type="checkbox" data-oracle-foreign-key-validated :class="structureCheckboxClass" :checked="fk.oracleState.validated" :disabled="!canEditForeignKeyDraft(fk)" @change="setOracleForeignKeyState(fk, 'validated', ($event.target as HTMLInputElement).checked)" />{{
+                        t("grid.tableInfoConstraintValidated")
+                      }}</label
+                    >
+                    <label class="flex items-center gap-1"
+                      ><input
+                        type="checkbox"
+                        data-oracle-foreign-key-deferrable
+                        :class="structureCheckboxClass"
+                        :checked="fk.oracleState.deferrable"
+                        :disabled="!canEditForeignKeyDraft(fk) || databaseType !== 'oracle'"
+                        @change="setOracleForeignKeyState(fk, 'deferrable', ($event.target as HTMLInputElement).checked)"
+                      />DEFERRABLE</label
+                    >
+                    <label class="flex items-center gap-1"
+                      ><input
+                        type="checkbox"
+                        data-oracle-foreign-key-deferred
+                        :class="structureCheckboxClass"
+                        :checked="fk.oracleState.initiallyDeferred"
+                        :disabled="!canEditForeignKeyDraft(fk) || databaseType !== 'oracle' || !fk.oracleState.deferrable"
+                        @change="setOracleForeignKeyState(fk, 'initiallyDeferred', ($event.target as HTMLInputElement).checked)"
+                      />INITIALLY DEFERRED</label
+                    >
+                    <label class="flex items-center gap-1"
+                      ><input
+                        type="checkbox"
+                        data-oracle-foreign-key-rely
+                        :class="structureCheckboxClass"
+                        :checked="fk.oracleState.rely"
+                        :disabled="!canEditForeignKeyDraft(fk) || fk.oracleState.validated"
+                        @change="setOracleForeignKeyState(fk, 'rely', ($event.target as HTMLInputElement).checked)"
+                      />RELY</label
+                    >
+                  </div>
+                </div>
                 <div class="mt-1.5 grid grid-cols-[minmax(110px,0.5fr)_minmax(110px,0.5fr)_1fr] gap-1.5">
                   <Select :model-value="fk.onDelete || '__default'" :disabled="!canEditForeignKeyDraft(fk)" @update:model-value="(v: any) => (fk.onDelete = String(v === '__default' ? '' : (v ?? '')))">
                     <SelectTrigger class="h-[var(--structure-control-height)] rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                       <SelectValue :placeholder="t('structureEditor.onDelete')" />
                     </SelectTrigger>
                     <SelectContent>
-                      <SelectItem v-for="action in foreignKeyActionOptions" :key="`delete-${action || 'default'}`" :value="action || '__default'">{{ action || t("structureEditor.defaultAction") }}</SelectItem>
+                      <SelectItem v-for="action in isOracleForeignKeyEditor ? ['', 'CASCADE', 'SET NULL', 'NO ACTION'] : foreignKeyActionOptions" :key="`delete-${action || 'default'}`" :value="action || '__default'">{{ action || t("structureEditor.defaultAction") }}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Select :model-value="fk.onUpdate || '__default'" :disabled="!canEditForeignKeyDraft(fk)" @update:model-value="(v: any) => (fk.onUpdate = String(v === '__default' ? '' : (v ?? '')))">
+                  <Select v-if="!isOracleForeignKeyEditor" :model-value="fk.onUpdate || '__default'" :disabled="!canEditForeignKeyDraft(fk)" @update:model-value="(v: any) => (fk.onUpdate = String(v === '__default' ? '' : (v ?? '')))">
                     <SelectTrigger class="h-[var(--structure-control-height)] rounded-[6px] px-[var(--structure-control-px)] text-[length:var(--structure-font-size)] focus-visible:border-ring/50 focus-visible:ring-1 focus-visible:ring-ring/25">
                       <SelectValue :placeholder="t('structureEditor.onUpdate')" />
                     </SelectTrigger>
@@ -6649,17 +8442,158 @@ watch(
               {{ t("structureEditor.emptyReadonly") }}
             </div>
             <div v-else class="space-y-1.5">
-              <div v-for="constraint in constraintsForTab" :key="constraint.name" class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]" :class="constraint.enabled === false ? 'opacity-60' : ''">
+              <div
+                v-for="constraint in constraintsForTab"
+                :key="constraint.name"
+                class="rounded-md border px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)]"
+                :class="constraint.enabled === false && existingPrimaryKeyDraft?.name !== constraint.name ? 'opacity-60' : ''"
+              >
                 <div class="flex flex-wrap items-center gap-1.5">
                   <span class="font-mono font-medium">{{ constraint.name }}</span>
                   <Badge variant="outline" class="shrink-0">{{ constraint.constraint_type }}</Badge>
                   <Badge variant="outline" class="shrink-0 text-muted-foreground">{{ t(constraint.enabled === true ? "grid.tableInfoConstraintEnabled" : constraint.enabled === false ? "structureEditor.constraintDisabled" : "grid.tableInfoConstraintEnabledUnknown") }}</Badge>
                   <Badge variant="outline" class="shrink-0 text-muted-foreground">{{ t(constraint.valid === true ? "grid.tableInfoConstraintValidated" : constraint.valid === false ? "structureEditor.constraintNotValidated" : "grid.tableInfoConstraintValidationUnknown") }}</Badge>
+                  <template v-if="canEditExistingPrimaryKey && constraint.constraint_type === 'PRIMARY KEY'">
+                    <Button variant="ghost" size="sm" :disabled="loading || saving || primaryKeyBusy" @click="editExistingPrimaryKey(constraint)">{{ t("common.edit") }}</Button>
+                    <Button variant="ghost" size="sm" :disabled="loading || saving || primaryKeyBusy" @click="editExistingPrimaryKey(constraint, true)">{{ t("common.delete") }}</Button>
+                  </template>
+                  <template v-if="isOracleConstraintEditor && ['CHECK', 'UNIQUE'].includes(constraint.constraint_type)">
+                    <Button variant="ghost" size="sm" :disabled="loading || saving || oracleConstraintBusy || !!oracleConstraintDraft" :aria-label="`Edit constraint ${constraint.name}`" :data-constraint-edit="constraint.name" @click="editOracleConstraint(constraint)">{{ t("common.edit") }}</Button>
+                    <Button variant="ghost" size="sm" :disabled="loading || saving || oracleConstraintBusy || !!oracleConstraintDraft" :aria-label="`Delete constraint ${constraint.name}`" :data-constraint-delete="constraint.name" @click="deleteOracleConstraint(constraint)">{{
+                      t("common.delete")
+                    }}</Button>
+                  </template>
+                </div>
+                <div v-if="oracleConstraintDraft?.original?.definition.name === constraint.name" class="mt-2 space-y-2" data-oracle-constraint-editor :data-constraint-editor="constraint.name">
+                  <template v-if="oracleConstraintDraft.target?.kind === 'check'">
+                    <Input v-model="oracleConstraintDraft.target.definition.name" :placeholder="t('structureEditor.constraintName')" :disabled="oracleConstraintBusy" />
+                    <textarea v-model="oracleConstraintDraft.target.definition.expression" :placeholder="t('structureEditor.checkExpression')" :disabled="oracleConstraintBusy" class="min-h-20 w-full rounded-md border bg-background px-3 py-2 font-mono text-sm" />
+                    <div class="flex flex-wrap gap-3 text-sm">
+                      <label class="flex items-center gap-1"><input v-model="oracleConstraintDraft.target.definition.state.enabled" type="checkbox" :disabled="oracleConstraintBusy" />{{ t("grid.tableInfoConstraintEnabled") }}</label
+                      ><label class="flex items-center gap-1"><input v-model="oracleConstraintDraft.target.definition.state.validated" type="checkbox" :disabled="oracleConstraintBusy" />{{ t("grid.tableInfoConstraintValidated") }}</label>
+                    </div>
+                  </template>
+                  <template v-else-if="oracleConstraintDraft.target?.kind === 'unique'">
+                    <Input v-model="oracleConstraintDraft.target.definition.name" :placeholder="t('structureEditor.constraintName')" :disabled="oracleConstraintBusy" />
+                    <div v-if="databaseType === 'oracle'" class="space-y-1 rounded border p-2" data-oracle-unique-index-policy>
+                      <span>{{ t("oceanbasePrimaryKey.indexPolicy") }}</span>
+                      <p v-if="oracleConstraintDraft.original?.kind === 'unique'" class="break-all font-mono text-xs">
+                        {{ oracleConstraintDraft.original.definition.index.name ? `${oracleConstraintDraft.original.definition.index.owner}.${oracleConstraintDraft.original.definition.index.name}` : t("oceanbasePrimaryKey.noIndex") }}
+                      </p>
+                      <Select v-model="oracleConstraintDraft.indexPolicy" :disabled="oracleConstraintBusy">
+                        <SelectTrigger><SelectValue /></SelectTrigger>
+                        <SelectContent>
+                          <SelectItem value="keep">{{ t("oceanbasePrimaryKey.keepIndex") }}</SelectItem>
+                          <SelectItem value="drop">{{ t("oceanbasePrimaryKey.dropIndex") }}</SelectItem>
+                        </SelectContent>
+                      </Select>
+                      <p v-if="oracleConstraintDraft.indexPolicy === 'keep'" class="text-xs text-muted-foreground">{{ t("oceanbasePrimaryKey.preserveState") }}</p>
+                    </div>
+                    <div v-for="(name, position) in oracleConstraintDraft.target.definition.columns" :key="`${name}-${position}`" class="flex items-center gap-1">
+                      <span class="min-w-0 flex-1 truncate font-mono">{{ position + 1 }}. {{ name }}</span>
+                      <Button variant="ghost" size="icon-xs" :title="t('oceanbasePrimaryKey.moveUp')" :disabled="oracleConstraintBusy || position === 0" @click="moveOracleUniqueColumn(position, -1)"><ChevronUp class="h-4 w-4" /></Button>
+                      <Button variant="ghost" size="icon-xs" :title="t('oceanbasePrimaryKey.moveDown')" :disabled="oracleConstraintBusy || position === oracleConstraintDraft.target.definition.columns.length - 1" @click="moveOracleUniqueColumn(position, 1)"><ChevronDown class="h-4 w-4" /></Button>
+                      <Button variant="ghost" size="icon-xs" :title="t('common.delete')" :disabled="oracleConstraintBusy" @click="oracleConstraintDraft.target.definition.columns.splice(position, 1)"><X class="h-4 w-4" /></Button>
+                    </div>
+                    <Select :disabled="oracleConstraintBusy" @update:model-value="(value: any) => addOracleUniqueColumn(String(value || ''))">
+                      <SelectTrigger><SelectValue :placeholder="t('structureEditor.addColumn')" /></SelectTrigger>
+                      <SelectContent
+                        ><SelectItem v-for="column in columns.filter((item) => !item.markedForDrop && oracleConstraintDraft?.target?.kind === 'unique' && !oracleConstraintDraft.target.definition.columns.includes(item.name))" :key="column.id" :value="column.name">{{
+                          column.name
+                        }}</SelectItem></SelectContent
+                      >
+                    </Select>
+                    <div class="flex flex-wrap gap-3 text-sm">
+                      <label class="flex items-center gap-1"><input v-model="oracleConstraintDraft.target.definition.state.enabled" type="checkbox" :disabled="oracleConstraintBusy" />{{ t("grid.tableInfoConstraintEnabled") }}</label
+                      ><label class="flex items-center gap-1"><input v-model="oracleConstraintDraft.target.definition.state.validated" type="checkbox" :disabled="oracleConstraintBusy" />{{ t("grid.tableInfoConstraintValidated") }}</label>
+                    </div>
+                  </template>
+                  <div class="flex gap-2">
+                    <Button size="sm" variant="ghost" :disabled="oracleConstraintBusy" @click="cancelOracleConstraintEdit">{{ t("common.cancel") }}</Button>
+                    <span v-if="oracleConstraintPlan" class="text-xs text-muted-foreground">{{ t("structureEditor.previewReady") }}</span>
+                  </div>
+                  <p v-for="notice in oracleConstraintPlan?.notices" :key="notice" class="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs">{{ t(notice) }}</p>
+                </div>
+                <div v-if="existingPrimaryKeyDraft?.name === constraint.name" class="mt-2 space-y-2" data-existing-primary-key-editor>
+                  <div v-for="(name, position) in existingPrimaryKeyDraft.columns" :key="name" class="flex items-center gap-1">
+                    <span class="min-w-0 flex-1 truncate font-mono">{{ position + 1 }}. {{ name }}</span>
+                    <Button variant="ghost" size="icon-xs" :title="t('oceanbasePrimaryKey.moveUp')" :disabled="primaryKeyBusy || position === 0" @click="moveExistingPrimaryKeyColumn(position, -1)"><ChevronUp class="h-4 w-4" /></Button>
+                    <Button variant="ghost" size="icon-xs" :title="t('oceanbasePrimaryKey.moveDown')" :disabled="primaryKeyBusy || position === existingPrimaryKeyDraft.columns.length - 1" @click="moveExistingPrimaryKeyColumn(position, 1)"><ChevronDown class="h-4 w-4" /></Button>
+                    <Button variant="ghost" size="icon-xs" :title="t('common.delete')" :disabled="primaryKeyBusy" @click="existingPrimaryKeyDraft.columns.splice(position, 1)"><X class="h-4 w-4" /></Button>
+                  </div>
+                  <p v-if="!existingPrimaryKeyDraft.columns.length" class="text-destructive">{{ t("oceanbasePrimaryKey.removeKey") }}</p>
+                  <div class="flex items-center gap-2">
+                    <Select v-model="primaryKeyNewColumn" :disabled="primaryKeyBusy || !primaryKeyAvailableColumns.length">
+                      <SelectTrigger class="h-7 min-w-0 flex-1"><SelectValue :placeholder="t('structureEditor.addColumn')" /></SelectTrigger>
+                      <SelectContent
+                        ><SelectItem v-for="column in primaryKeyAvailableColumns" :key="column.id" :value="column.name">{{ column.name }}</SelectItem></SelectContent
+                      >
+                    </Select>
+                    <Button variant="outline" size="sm" :disabled="primaryKeyBusy || !primaryKeyNewColumn" @click="addExistingPrimaryKeyColumn">{{ t("structureEditor.addColumn") }}</Button>
+                    <Button variant="ghost" size="sm" :disabled="primaryKeyBusy" @click="existingPrimaryKeyDraft = undefined">{{ t("common.cancel") }}</Button>
+                  </div>
+                  <div v-if="existingPrimaryKeyDraft.oracleIndex" class="space-y-1">
+                    <span>{{ t("oceanbasePrimaryKey.indexPolicy") }}</span>
+                    <p v-if="currentPrimaryKeyIndex?.policy === 'none'" data-primary-key-index-identity class="text-xs">{{ t("oceanbasePrimaryKey.noIndex") }}</p>
+                    <p v-else-if="currentPrimaryKeyIndex" data-primary-key-index-identity class="break-all font-mono text-xs">{{ currentPrimaryKeyIndex.owner }}.{{ currentPrimaryKeyIndex.name }}</p>
+                    <Select v-if="currentPrimaryKeyIndex?.policy !== 'none'" v-model="existingPrimaryKeyDraft.oracleIndex.policy" :disabled="primaryKeyBusy">
+                      <SelectTrigger :aria-label="t('oceanbasePrimaryKey.indexPolicy')"><SelectValue /></SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="keep">{{ t("oceanbasePrimaryKey.keepIndex") }}</SelectItem>
+                        <SelectItem value="drop">{{ t("oceanbasePrimaryKey.dropIndex") }}</SelectItem>
+                      </SelectContent>
+                    </Select>
+                    <p class="text-xs text-muted-foreground">{{ t("oceanbasePrimaryKey.preserveState") }}</p>
+                  </div>
+                  <p v-if="existingPrimaryKeyChanged" class="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs">
+                    {{ t(currentPrimaryKeyIndex?.policy === "none" ? "oceanbasePrimaryKey.noIndexImpact" : existingPrimaryKeyDraft.oracleIndex ? "oceanbasePrimaryKey.oracleImpact" : "oceanbasePrimaryKey.impact") }}
+                  </p>
                 </div>
                 <div v-if="constraint.columns.length" class="mt-1 truncate font-mono text-muted-foreground">{{ constraint.columns.join(", ") }}</div>
                 <div v-if="constraint.ref_table" class="mt-1 truncate font-mono text-muted-foreground">-> {{ constraint.ref_schema ? `${constraint.ref_schema}.` : "" }}{{ constraint.ref_table }}{{ constraint.ref_columns.length ? `(${constraint.ref_columns.join(", ")})` : "" }}</div>
                 <div v-if="constraint.definition" class="mt-1 whitespace-pre-wrap break-words font-mono text-muted-foreground">{{ constraint.definition }}</div>
               </div>
+            </div>
+            <div v-if="oracleConstraintDraft && !oracleConstraintDraft.original" class="mt-2 rounded-md border p-3" data-oracle-constraint-editor data-constraint-editor="new">
+              <template v-if="oracleConstraintDraft.target?.kind === 'check'">
+                <Input v-model="oracleConstraintDraft.target.definition.name" :placeholder="t('structureEditor.constraintName')" :disabled="oracleConstraintBusy" />
+                <textarea v-model="oracleConstraintDraft.target.definition.expression" :placeholder="t('structureEditor.checkExpression')" :disabled="oracleConstraintBusy" class="mt-2 min-h-20 w-full rounded-md border bg-background px-3 py-2 font-mono text-sm" />
+                <div class="flex flex-wrap gap-3 text-sm">
+                  <label class="flex items-center gap-1"><input v-model="oracleConstraintDraft.target.definition.state.enabled" type="checkbox" :disabled="oracleConstraintBusy" />{{ t("grid.tableInfoConstraintEnabled") }}</label
+                  ><label class="flex items-center gap-1"><input v-model="oracleConstraintDraft.target.definition.state.validated" type="checkbox" :disabled="oracleConstraintBusy" />{{ t("grid.tableInfoConstraintValidated") }}</label>
+                </div>
+              </template>
+              <template v-else-if="oracleConstraintDraft.target?.kind === 'unique'">
+                <Input v-model="oracleConstraintDraft.target.definition.name" :placeholder="t('structureEditor.constraintName')" :disabled="oracleConstraintBusy" />
+                <div v-if="databaseType === 'oracle'" class="space-y-1 rounded border p-2" data-oracle-unique-index-policy>
+                  <span>{{ t("oceanbasePrimaryKey.indexPolicy") }}</span>
+                  <Select v-model="oracleConstraintDraft.indexPolicy" :disabled="oracleConstraintBusy">
+                    <SelectTrigger><SelectValue /></SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="keep">{{ t("oceanbasePrimaryKey.keepIndex") }}</SelectItem>
+                      <SelectItem value="drop">{{ t("oceanbasePrimaryKey.dropIndex") }}</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div v-for="(name, position) in oracleConstraintDraft.target.definition.columns" :key="`${name}-${position}`" class="flex items-center gap-1">
+                  <span class="min-w-0 flex-1 truncate font-mono">{{ position + 1 }}. {{ name }}</span>
+                  <Button variant="ghost" size="icon-xs" :disabled="oracleConstraintBusy" @click="oracleConstraintDraft.target.kind === 'unique' && oracleConstraintDraft.target.definition.columns.splice(position, 1)"><X class="h-4 w-4" /></Button>
+                </div>
+                <Select :disabled="oracleConstraintBusy" @update:model-value="(value: any) => addOracleUniqueColumn(String(value || ''))"
+                  ><SelectTrigger><SelectValue :placeholder="t('structureEditor.addColumn')" /></SelectTrigger
+                  ><SelectContent
+                    ><SelectItem v-for="column in columns.filter((item) => !item.markedForDrop && oracleConstraintDraft?.target?.kind === 'unique' && !oracleConstraintDraft.target.definition.columns.includes(item.name))" :key="column.id" :value="column.name">{{
+                      column.name
+                    }}</SelectItem></SelectContent
+                  ></Select
+                >
+                <div class="flex flex-wrap gap-3 text-sm">
+                  <label class="flex items-center gap-1"><input v-model="oracleConstraintDraft.target.definition.state.enabled" type="checkbox" :disabled="oracleConstraintBusy" />{{ t("grid.tableInfoConstraintEnabled") }}</label
+                  ><label class="flex items-center gap-1"><input v-model="oracleConstraintDraft.target.definition.state.validated" type="checkbox" :disabled="oracleConstraintBusy" />{{ t("grid.tableInfoConstraintValidated") }}</label>
+                </div>
+              </template>
+              <Button variant="ghost" size="sm" :disabled="oracleConstraintBusy" @click="cancelOracleConstraintEdit">{{ t("common.cancel") }}</Button>
+              <p v-for="notice in oracleConstraintPlan?.notices" :key="notice" class="rounded border border-amber-500/30 bg-amber-500/10 p-2 text-xs">{{ t(notice) }}</p>
             </div>
           </TabsContent>
 
@@ -6721,8 +8655,18 @@ watch(
                       <SelectItem v-for="event in triggerEventOptions" :key="event" :value="event">{{ event }}</SelectItem>
                     </SelectContent>
                   </Select>
-                  <Badge v-if="trigger.original && trigger.original.enabled !== undefined && trigger.original.enabled !== null" variant="outline" class="shrink-0 text-[length:var(--structure-font-size)]">
-                    {{ trigger.original.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
+                  <Button
+                    v-if="isOracleTriggerEditor && trigger.enabled !== undefined"
+                    variant="outline"
+                    size="sm"
+                    :class="['h-[var(--structure-control-height)] shrink-0 px-[var(--structure-control-px)] text-[length:var(--structure-font-size)]', !trigger.enabled ? 'text-muted-foreground' : '']"
+                    :disabled="!canToggleTriggerEnabled(trigger)"
+                    @click.stop="trigger.enabled = !trigger.enabled"
+                  >
+                    {{ trigger.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
+                  </Button>
+                  <Badge v-else-if="trigger.enabled !== undefined && trigger.enabled !== null" variant="outline" class="shrink-0 text-[length:var(--structure-font-size)]">
+                    {{ trigger.enabled ? t("damengJobAdmin.enabled") : t("damengJobAdmin.disabled") }}
                   </Badge>
                   <Button v-if="trigger.original" variant="ghost" size="sm" :class="structureToolbarButtonClass" @click.stop="toggleDropTrigger(trigger)">
                     <Trash2 :class="structureIconClass" />
@@ -6923,6 +8867,12 @@ watch(
         </Tabs>
       </div>
 
+      <p v-if="!isCreateMode && databaseType === 'starrocks'" class="shrink-0 px-3 py-2 text-xs text-muted-foreground">
+        {{ t("starrocksLayout.alterHint") }} {{ t(structureCapabilities.reorderColumn ? "starrocksLayout.reorderHint" : starrocksAlterContext?.model === "primary" ? "starrocksLayout.localReorderHint" : "starrocksLayout.reorderMetadataHint") }}
+      </p>
+      <StarRocksSortKeyEditor v-if="!isCreateMode && databaseType === 'starrocks' && activeTab === 'columns' && starrocksSortColumns" v-model="starrocksSortColumns" :context="starrocksAlterContext" :columns="columns" :disabled="saving || loading" />
+      <StarRocksPhysicalOptionsEditor v-if="isCreateMode && databaseType === 'starrocks'" v-model="starrocksPhysicalOptions" :columns="columns" :server-version="connection?.database_info?.productVersion" :disabled="saving" />
+
       <div :class="['flex min-w-0 shrink-0 flex-col overflow-hidden rounded-md border', sqlPreviewCollapsed ? '' : 'h-[28%] min-h-40 max-h-64']">
         <div class="flex shrink-0 items-center justify-between border-b px-[var(--structure-cell-px)] py-[var(--structure-header-py)] text-[length:var(--structure-font-size)] font-medium">
           <div class="flex items-center gap-1.5">
@@ -6998,18 +8948,80 @@ watch(
           <DialogTitle>{{ t("structureEditor.copyColumnsTitle") }}</DialogTitle>
         </DialogHeader>
 
-        <div class="space-y-3 overflow-hidden">
+        <div class="max-h-[65vh] space-y-3 overflow-y-auto">
+          <p class="text-xs text-muted-foreground">{{ t("structureEditor.copyColumnsSameTypeOnly") }}</p>
+          <div class="grid gap-3 sm:grid-cols-2">
+            <div class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-connection-label">{{ t("structureEditor.copyColumnsSourceConnection") }}</label>
+              <SearchableSelect
+                :model-value="copySourceConnectionId"
+                :options="copySourceConnections.map((config) => config.id)"
+                :placeholder="t('structureEditor.copyColumnsSourceConnection')"
+                :search-placeholder="t('structureEditor.copyColumnsSourceConnection')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-connection-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :display-name="(id: string) => store.getConfig(id)?.name || id"
+                @update:model-value="(value: string) => changeCopySourceScope('connection', value)"
+              />
+            </div>
+            <div v-if="copySourceCatalogs.length > 0" class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-catalog-label">{{ t("structureEditor.copyColumnsSourceCatalog") }}</label>
+              <SearchableSelect
+                :model-value="copySourceCatalog"
+                :options="copySourceCatalogs.map((catalog) => catalog.name)"
+                :placeholder="t('structureEditor.copyColumnsSourceCatalog')"
+                :search-placeholder="t('structureEditor.copyColumnsSourceCatalog')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-catalog-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :disabled="copySourceScopeLoading || !copySourceCatalogs.length"
+                @update:model-value="(value: string) => changeCopySourceScope('catalog', value)"
+              />
+            </div>
+            <div class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-database-label">{{ t(copySourceRootSchemaMode ? "structureEditor.copyColumnsSourceSchema" : "structureEditor.copyColumnsSourceDatabase") }}</label>
+              <SearchableSelect
+                :model-value="copySourceDatabase"
+                :options="copySourceDatabases"
+                :placeholder="t(copySourceRootSchemaMode ? 'structureEditor.copyColumnsSourceSchema' : 'structureEditor.copyColumnsSourceDatabase')"
+                :search-placeholder="t(copySourceRootSchemaMode ? 'structureEditor.copyColumnsSourceSchema' : 'structureEditor.copyColumnsSourceDatabase')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-database-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :disabled="copySourceScopeLoading || !copySourceDatabases.length"
+                @update:model-value="(value: string) => changeCopySourceScope('database', value)"
+              />
+            </div>
+            <div v-if="copySourceHasSchema" class="grid gap-1.5 text-sm font-medium">
+              <label id="copy-source-schema-label">{{ t("structureEditor.copyColumnsSourceSchema") }}</label>
+              <SearchableSelect
+                :model-value="copySourceSchema"
+                :options="copySourceSchemas"
+                :placeholder="t('structureEditor.copyColumnsSourceSchema')"
+                :search-placeholder="t('structureEditor.copyColumnsSourceSchema')"
+                :empty-text="t('common.noResults')"
+                aria-labelledby="copy-source-schema-label"
+                trigger-class="h-8 w-full justify-between text-xs"
+                :disabled="copySourceScopeLoading || !copySourceSchemas.length"
+                @update:model-value="(value: string) => changeCopySourceScope('schema', value)"
+              />
+            </div>
+          </div>
           <div class="grid gap-1.5 text-sm font-medium">
             <label for="copy-source-table-search">{{ t("structureEditor.copyColumnsSourceTable") }}</label>
-            <Input id="copy-source-table-search" :model-value="copySourceTableSearch" :placeholder="t('structureEditor.copyColumnsSearchSourceTables')" @update:model-value="updateCopySourceTableSearch" />
+            <Input id="copy-source-table-search" :disabled="!copySourceScopeReady || copySourceScopeLoading" :model-value="copySourceTableSearch" :placeholder="t('structureEditor.copyColumnsSearchSourceTables')" @update:model-value="updateCopySourceTableSearch" />
           </div>
 
-          <div v-if="copySourceTablesLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
+          <div v-if="copySourceScopeLoading || copySourceTablesLoading" class="flex items-center gap-2 py-5 text-sm text-muted-foreground">
             <Loader2 class="h-4 w-4 animate-spin" />
             {{ t("common.loading") }}
           </div>
           <div v-else-if="copySourceError" class="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
             {{ copySourceError }}
+          </div>
+          <div v-else-if="!copySourceScopeReady" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
+            {{ t("common.noResults") }}
           </div>
           <div v-else-if="copySourceTables.length === 0" class="rounded-md border border-dashed px-3 py-5 text-center text-sm text-muted-foreground">
             {{ copySourceTableSearch ? t("structureEditor.copyColumnsNoMatchingSourceTables") : t("structureEditor.copyColumnsNoSourceTables") }}
@@ -7091,7 +9103,7 @@ watch(
 
         <DialogFooter>
           <Button variant="outline" @click="copyColumnsDialogOpen = false">{{ t("structureEditor.copyColumnsCancel") }}</Button>
-          <Button :disabled="copySourceColumnsLoading || selectedCopySourceColumns.length === 0" @click="applyCopiedColumns">
+          <Button :disabled="!canAddColumn || !copySourceCompatible || !copySourceScopeReady || copySourceScopeLoading || copySourceTablesLoading || copySourceColumnsLoading || !!copySourceError || selectedCopySourceColumns.length === 0" @click="applyCopiedColumns">
             {{ t("structureEditor.copyColumnsApply", { count: selectedCopySourceColumns.length }) }}
           </Button>
         </DialogFooter>

@@ -11,6 +11,7 @@ import {
   getSqlCompletionContext,
   getSqlCompletionResultValidFor,
   isSqlLikeCompletionStatement,
+  normalizeIdentifierPart,
   prepareSqlCompletionReplacement,
   recordCompletionSelection,
   shouldAutoOpenSqlCompletion,
@@ -49,7 +50,7 @@ import { completionLabelPresentation } from "@/lib/editor/sqlCompletionPresentat
 import { supportsDatabaseNameCompletion } from "@/lib/database/databaseFeatureSupport";
 import { sqlSnippetDatabaseTypeForConnection } from "@/lib/database/jdbcDialect";
 import { oracleDatabaseLinkCompletionItems } from "@/lib/sql/oracleDatabaseLinkCompletion";
-import { isOracleCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
+import { isOracleCompletionDatabase, isSequenceCompletionDatabase } from "@/lib/sql/oracleCompletionSession";
 import { buildRedisCompletionItemsFromContext, getRedisCompletionContext, getRedisCompletionResultValidFor, shouldAutoOpenRedisCompletion, takesKeyArgument } from "@/lib/redis/redisCompletion";
 import type { SqlCompletionColumn, SqlCompletionContext, SqlCompletionForeignKey, SqlCompletionItem, SqlCompletionObject } from "@/lib/sql/sqlCompletion";
 import type { CompletionAssistantObjectKind, SqlServerCompletionContext } from "@/types/database";
@@ -1420,11 +1421,28 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
       const list = (schema: string | undefined, parentName?: string, globalSearch = false) =>
         connectionStore.listCompletionObjects(props.connectionId!, scope.database, completionContext.prefix, MAX_COMPLETION_TABLES, schema, parentName, globalSearch, scope.schema, objectKinds, !!completionContext.prefixQuoted);
       if (parts.length === 0) return list(scope.schema, undefined, true);
-      if (parts.length === 2) return list(parts[0], parts[1]);
+      if (parts.length === 2) {
+        let packageMembers: SqlCompletionObject[] = [];
+        try {
+          packageMembers = await list(parts[0], parts[1]);
+        } catch (error) {
+          if (/Package is not visible:/i.test(String(error)) && objectKinds.includes("sequence")) {
+            const schemaObjects = await list(parts[0]);
+            return schemaObjects.filter((obj) => obj.type === "sequence");
+          }
+          throw error;
+        }
+        if (packageMembers.length > 0) return packageMembers;
+        if (objectKinds.includes("sequence")) {
+          const schemaObjects = await list(parts[0]);
+          return schemaObjects.filter((obj) => obj.type === "sequence");
+        }
+        return [];
+      }
       if (parts.length > 2) return [];
       // One qualifier can name a schema or a package in the current schema.
-      const groups = await Promise.allSettled([list(parts[0]), list(scope.schema, parts[0])]);
-      if (groups[0].status === "rejected" && groups[1].status === "rejected") throw groups[0].reason;
+      const groups = await Promise.allSettled([list(parts[0]), list(scope.schema, parts[0]), ...(objectKinds.includes("sequence") && scope.schema && normalizeIdentifierPart(scope.schema) !== normalizeIdentifierPart(parts[0]) ? [list(scope.schema)] : [])]);
+      if (groups.every((g) => g.status === "rejected")) throw groups[0].status === "rejected" ? groups[0].reason : undefined;
       let objects: SqlCompletionObject[] = [];
       for (const group of groups) {
         if (group.status === "fulfilled") objects = mergeCompletionObjects(objects, group.value);
@@ -1444,7 +1462,7 @@ export function useQueryEditorCompletion(options: QueryEditorCompletionOptions) 
 
   function completionObjectKindsForContext(completionContext: ReturnType<typeof getSqlCompletionContext>): CompletionAssistantObjectKind[] {
     if (completionContext.contextKind === "exec") return ["procedure"];
-    if (isOracleCompletionDatabase(props.databaseType)) {
+    if (isSequenceCompletionDatabase(props.databaseType)) {
       if (completionContext.suggestColumns && completionContext.referencedTables.length > 0 && !completionContext.qualifier) {
         return ["function", "sequence"];
       }

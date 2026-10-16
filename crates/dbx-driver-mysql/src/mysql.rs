@@ -153,7 +153,8 @@ pub async fn get_event_info<P: MySqlPoolAccess + ?Sized>(
     let mut conn = get_conn_with_health_check(pool).await?;
     let sql = format!(
         "SELECT EVENT_SCHEMA, EVENT_NAME, DEFINER, TIME_ZONE, EVENT_TYPE, EXECUTE_AT, INTERVAL_VALUE, INTERVAL_FIELD, STARTS, ENDS, STATUS, ON_COMPLETION, EVENT_COMMENT, EVENT_DEFINITION, CREATED, LAST_ALTERED, LAST_EXECUTED FROM information_schema.EVENTS WHERE EVENT_SCHEMA = {} AND EVENT_NAME = {} LIMIT 1",
-        quote_value(database), quote_value(name)
+        quote_value(database),
+        quote_value(name)
     );
     let row = conn
         .query_first::<mysql_async::Row, _>(sql)
@@ -689,15 +690,32 @@ pub async fn database_connection_info(
     let product_name = nonblank(product_name.into()).unwrap_or_else(|| "MySQL".to_string());
     let mut conn = get_conn_with_health_check(pool).await?;
 
+    let server_comment = query_first_nonblank_string(&mut conn, "SELECT @@version_comment").await;
+    let version_sql = database_product_version_query(&product_name, server_comment.as_deref());
+    let mut product_version = query_first_nonblank_string(&mut conn, version_sql).await;
+    if product_version.is_none() && version_sql == "SELECT current_version()" {
+        // VERSION() reports MySQL compatibility (often 5.1.0), not StarRocks.
+        product_version = server_comment.clone();
+    }
     Ok(DatabaseConnectionInfo {
         product_name: Some(product_name),
-        product_version: query_first_nonblank_string(&mut conn, "SELECT VERSION()").await,
+        product_version,
         current_database: query_first_nonblank_string(&mut conn, "SELECT COALESCE(DATABASE(), '')").await,
-        server_comment: query_first_nonblank_string(&mut conn, "SELECT @@version_comment").await,
+        server_comment,
         server_charset: query_first_nonblank_string(&mut conn, "SELECT @@character_set_server").await,
         server_collation: query_first_nonblank_string(&mut conn, "SELECT @@collation_server").await,
         ..DatabaseConnectionInfo::default()
     })
+}
+
+fn database_product_version_query(product_name: &str, server_comment: Option<&str>) -> &'static str {
+    if product_name.to_ascii_lowercase().contains("starrocks")
+        || server_comment.is_some_and(|comment| comment.to_ascii_lowercase().contains("starrocks"))
+    {
+        "SELECT current_version()"
+    } else {
+        "SELECT VERSION()"
+    }
 }
 
 pub fn protocol_product_name(config: &ConnectionConfig) -> String {
@@ -3280,7 +3298,9 @@ pub async fn list_tables_filtered(
         .collect();
 
     if tables.is_empty() {
-        log::debug!("Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables");
+        log::debug!(
+            "Falling back to SHOW TABLES for database `{database}` after information_schema.TABLES returned no named tables"
+        );
         return list_tables_show_filtered(pool, database, filter)
             .await
             .map(|tables| filter_list_tables_fallback(tables, filter, limit, offset, object_types, table_name_filter));
@@ -7087,6 +7107,9 @@ pub async fn list_indexes(pool: &MySqlPool, database: &str, table: &str) -> Resu
                 let index_position = indexes.len();
                 index_positions.insert(name.clone(), index_position);
                 indexes.push(IndexInfo {
+                    key_directions: Vec::new(),
+                    visibility: None,
+                    key_metadata_complete: false,
                     name: name.clone(),
                     columns: Vec::new(),
                     is_unique: get_opt_i32(&row, "NON_UNIQUE").unwrap_or(1) == 0,
@@ -7281,6 +7304,16 @@ pub async fn list_triggers(pool: &MySqlPool, database: &str, table: &str) -> Res
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn product_version_uses_starrocks_function_only_for_starrocks() {
+        assert_eq!(super::database_product_version_query("StarRocks", None), "SELECT current_version()");
+        assert_eq!(
+            super::database_product_version_query("Custom label", Some("StarRocks version 3.5.0")),
+            "SELECT current_version()"
+        );
+        assert_eq!(super::database_product_version_query("MySQL", Some("MySQL Community Server")), "SELECT VERSION()");
+    }
+
     use super::*;
     use mysql_async::{consts::ColumnType, Column, Value};
     use mysql_common::row::new_row;
@@ -9754,11 +9787,7 @@ mod tests {
                 Some(MySqlSetupMode::Compatible),
                 "{error}"
             );
-            assert_eq!(
-                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error),
-                None,
-                "{error}"
-            );
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error), None, "{error}");
         }
     }
 
@@ -9776,11 +9805,7 @@ mod tests {
                 Some(MySqlSetupMode::Compatible),
                 "{error}"
             );
-            assert_eq!(
-                mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error),
-                None,
-                "{error}"
-            );
+            assert_eq!(mysql_group_concat_setup_fallback_mode(MySqlSetupMode::Compatible, error), None, "{error}");
         }
     }
 

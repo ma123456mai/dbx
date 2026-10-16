@@ -63,6 +63,7 @@ import {
   describeMongoCommandParseFailure,
   mongoDroppedIndexesToQueryResult,
   mongoFindLogicalTotal,
+  mongoFindPageCoversLogicalLimit,
   mongoIndexesToQueryResult,
   planMongoFindPagination,
   mongoUseToQueryResult,
@@ -139,6 +140,7 @@ import { resolveSavedSqlExecutionTarget, savedSqlExecutionTargetFromFile, savedS
 import { safeLocalStorageGet, safeLocalStorageRemove } from "@/lib/backend/safeStorage";
 import { sqlTextFingerprint } from "@/lib/sql/sqlTextFingerprint";
 import { loadEditableObjectSourceForEditor } from "@/lib/table/objectSourceLoad";
+import { assertSourceIdentity, captureSourceIdentity, renewSourceIdentity, type SourceIdentitySnapshot } from "@/lib/table/objectSourceIdentity";
 import { buildEditableObjectSource } from "@/lib/table/objectSourceEditor";
 import { disposeAllSqlServerActivityTraces, disposeSqlServerActivityTrace } from "@/lib/sqlserver/sqlServerActivityTraceRuntime";
 import type { SavedSqlFile } from "@/types/database";
@@ -163,7 +165,7 @@ const GROUPED_DISPLAY_LIMITER_SCOPE_PREFIX = "query-column-comments:";
 const groupedDisplayMetadataLimiter = new MetadataTaskLimiter(GROUPED_DISPLAY_METADATA_CONCURRENCY, (event) => {
   console.debug("[DBX][metadata-load:grouped-display-limiter]", event);
 });
-const UPPERCASE_FOLDED_METADATA_TYPES = new Set<string>([...ORACLE_LIKE_METADATA_TYPES, "saphana"]);
+const UPPERCASE_FOLDED_METADATA_TYPES = new Set<string>([...ORACLE_LIKE_METADATA_TYPES, "saphana", "db2"]);
 // Engines whose SQL takes dbx's appended hidden primary-key projection. The rewrite
 // quotes the key through the engine's own semantic dialect adapter, so Dameng and
 // OceanBase Oracle mode ride the Oracle adapter and HighGo rides the PostgreSQL one
@@ -1130,6 +1132,27 @@ export const useQueryStore = defineStore("query", () => {
   const t = getI18nT();
   const settingsStore = useSettingsStore();
   const tabs = ref<QueryTab[]>([]);
+  const sourceIdentities = new WeakMap<NonNullable<QueryTab["objectSource"]>, SourceIdentitySnapshot>();
+  function getObjectSourceIdentitySnapshot(tab: QueryTab): SourceIdentitySnapshot | undefined {
+    if (!tab.objectSource) return undefined;
+    let snapshot = sourceIdentities.get(tab.objectSource);
+    if (!snapshot) {
+      snapshot = captureSourceIdentity({ connectionId: tab.connectionId, database: tab.database, schema: tab.objectSource.schema || tab.schema || tab.database, objectType: tab.objectSource.objectType, name: tab.objectSource.name });
+      sourceIdentities.set(tab.objectSource, snapshot);
+    }
+    if (snapshot.connectionId !== tab.connectionId || snapshot.database !== tab.database || (snapshot.schema || snapshot.database) !== (tab.objectSource.schema || tab.schema || tab.database) || snapshot.objectType !== tab.objectSource.objectType || snapshot.name !== tab.objectSource.name)
+      throw new Error(i18n.global.t("objects.sourceIdentityChanged"));
+    return snapshot;
+  }
+  watch(
+    () => tabs.value.map((tab) => tab.objectSource),
+    () => {
+      for (const tab of tabs.value) {
+        if (tab.objectSource && !sourceIdentities.has(tab.objectSource)) getObjectSourceIdentitySnapshot(tab);
+      }
+    },
+    { flush: "sync" },
+  );
   // New tabs are created by many feature-specific entry points. Tracking id
   // changes here gives every one a stable timestamp without duplicating the
   // field at each call site; restored legacy tabs retain their saved order.
@@ -2233,6 +2256,17 @@ export const useQueryStore = defineStore("query", () => {
     }
   }
 
+  function releaseReplacedResultLargeValues(tab: QueryTab, ...previousResults: Array<QueryResult | undefined>) {
+    const retainedResults = [tab.result, ...(tab.results ?? []), ...(tab.resultRuns ?? []).flatMap((run) => [run.result, ...(run.results ?? [])])];
+    const retainedRefs = new Set(retainedResults.flatMap((result) => resultLargeValueKeys(result)));
+    const discardedResults = previousResults.map((result) => {
+      if (!result) return undefined;
+      const refs = [...(result.large_value_refs ?? []), ...(result.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))];
+      return { ...result, large_value_cells: [], large_value_refs: refs.filter((valueRef) => !retainedRefs.has(resultLargeValueKey(result, valueRef))) };
+    });
+    void releaseResultLargeValues(...discardedResults);
+  }
+
   async function closeResultRunSession(tab: QueryTab, run: NonNullable<QueryTab["resultRuns"]>[number]) {
     if (!run.resultSessionId) return;
     const target = run.multiDbExecution?.target;
@@ -2483,14 +2517,7 @@ export const useQueryStore = defineStore("query", () => {
     };
     void persistResultRun(tab, run);
     tab.resultRuns[index] = run;
-    const retainedResults = [tab.result, ...(tab.results ?? []), ...tab.resultRuns.flatMap((item) => [item.result, ...(item.results ?? [])])];
-    const retainedRefs = new Set(retainedResults.flatMap((result) => resultLargeValueKeys(result)));
-    const discardedResults = [previousRun.result, ...(previousRun.results ?? [])].map((result) => {
-      if (!result) return undefined;
-      const refs = [...(result.large_value_refs ?? []), ...(result.large_value_cells ?? []).flatMap((cell) => (cell.value_ref ? [cell.value_ref] : []))];
-      return { ...result, large_value_cells: [], large_value_refs: refs.filter((valueRef) => !retainedRefs.has(resultLargeValueKey(result, valueRef))) };
-    });
-    void releaseResultLargeValues(...discardedResults);
+    releaseReplacedResultLargeValues(tab, previousRun.result, ...(previousRun.results ?? []));
   }
 
   function syncDisplayedResultRun(tab: QueryTab, sql: string, captureNewRun = false, options: ResultRunCaptureOptions = {}) {
@@ -2735,6 +2762,7 @@ export const useQueryStore = defineStore("query", () => {
       editorViewport: t.editorViewport,
       editorSelection: t.editorSelection,
       savedSqlId: t.savedSqlId,
+      isDefaultQuery: t.isDefaultQuery,
       externalSqlPath: t.externalSqlPath,
       externalSqlEncoding: t.externalSqlEncoding,
       externalSqlFileVersion: t.externalSqlFileVersion,
@@ -2820,7 +2848,8 @@ export const useQueryStore = defineStore("query", () => {
   // reflects the latest in-memory tabs without waiting for the 300ms debounce.
   // Lets callers (e.g. tests that reload the store) read back persisted state
   // deterministically instead of racing the debounce timer.
-  function flushPendingPersist(): Promise<void> {
+  async function flushPendingPersist(): Promise<void> {
+    await flushDefaultQueries();
     if (isDetachedWindow()) return flushDetachedTabPersistence(activeTabId.value ?? undefined);
     if (storePersistGeneration !== persistGeneration) return Promise.resolve();
     if (persistTimer) {
@@ -2836,6 +2865,7 @@ export const useQueryStore = defineStore("query", () => {
     if (tab.mode !== "query" && tab.mode !== "data") throw new Error("Only SQL and data tabs can be detached");
     if (tab.isExecuting || tab.isCancelling || tab.isExplaining) throw new Error("Wait for the current operation to finish before detaching this tab");
 
+    await flushDefaultQuery(tab);
     const savedTab = serializeOpenTabs([tab])[0];
     if (!savedTab) throw new Error("Unable to serialize tab");
 
@@ -3039,6 +3069,8 @@ export const useQueryStore = defineStore("query", () => {
       existing.sourceView = true;
       switchTab(existing.id);
       if (!isTabDirty(existing)) {
+        const snapshot = getObjectSourceIdentitySnapshot(existing);
+        if (snapshot) assertSourceIdentity(snapshot);
         updateSql(existing.id, options.sql);
         markTabClean(existing);
       }
@@ -3130,6 +3162,8 @@ export const useQueryStore = defineStore("query", () => {
     const schema = objectSource.schema || tab.schema || database;
     sourceRevalidateInFlight.add(id);
     try {
+      const identity = getObjectSourceIdentitySnapshot(tab)!;
+      assertSourceIdentity(identity);
       const connectionStore = useConnectionStore();
       await connectionStore.ensureConnected(connectionId);
       const databaseType = effectiveDatabaseTypeForConnection(connectionStore.getConfig(connectionId));
@@ -3149,7 +3183,9 @@ export const useQueryStore = defineStore("query", () => {
       });
       // 期间 tab 可能被关闭、被复用或已被编辑：身份没变且用户没改过内容时才回填
       const current = tabs.value.find((candidate) => candidate.id === id);
+      assertSourceIdentity(identity);
       if (current?.objectSource !== objectSource || resolvedType !== objectSource.objectType) return;
+      if (current.connectionId !== connectionId || current.database !== database || (current.objectSource.schema || current.schema || current.database) !== schema) return;
       if (raw.editable === false || (OBJECT_SOURCE_READ_ONLY_TYPES.includes(resolvedType) && !(databaseType === "oceanbase-oracle" && resolvedType === "SEQUENCE"))) return;
       if (isTabDirty(current)) return;
       updateSql(id, editableSource);
@@ -3200,6 +3236,8 @@ export const useQueryStore = defineStore("query", () => {
     const { database } = tab;
     const schema = tab.schema || database;
     const { request, initialEditing } = tab.sourceLoad;
+    const sourceLoad = tab.sourceLoad;
+    const identity = captureSourceIdentity({ connectionId, database, schema, name: request.name, objectType: request.objectType });
     try {
       const connectionStore = useConnectionStore();
       await connectionStore.ensureConnected(connectionId);
@@ -3219,11 +3257,19 @@ export const useQueryStore = defineStore("query", () => {
         databaseType,
         signature: request.signature,
       });
+      if (tabs.value.find((candidate) => candidate.id === id)?.sourceLoad !== sourceLoad) return;
+      if (tab.connectionId !== connectionId || tab.database !== database || (tab.schema || tab.database) !== schema) throw new Error(i18n.global.t("objects.sourceIdentityChanged"));
+      const renewedIdentity = renewSourceIdentity(identity);
+      // Fallback can resolve another kind; never activate a frozen resolved object.
+      const resolvedIdentity = resolvedType === request.objectType ? renewedIdentity : captureSourceIdentity({ ...identity, objectType: resolvedType });
+      assertSourceIdentity(resolvedIdentity);
       applyLoadedObjectSource(id, { connectionId, database, schema, catalog: tab.catalog, title: tab.title, request, initialEditing, databaseType, editableSource, raw, resolvedType });
+      const loadedTab = tabs.value.find((candidate) => candidate.id === id);
+      if (loadedTab?.objectSource) sourceIdentities.set(loadedTab.objectSource, resolvedIdentity);
     } catch (e: any) {
       // 就地显示错误 + Retry：用户此刻正看着这个 tab，比 toast 更可发现
       const failed = tabs.value.find((candidate) => candidate.id === id);
-      if (failed?.sourceLoad) failed.sourceLoad.error = e?.message || String(e);
+      if (failed?.sourceLoad === sourceLoad) failed.sourceLoad.error = e?.message || String(e);
     }
   }
 
@@ -3261,6 +3307,8 @@ export const useQueryStore = defineStore("query", () => {
       // 有则交接给它并关掉 pending 占位，避免同一个对象出现两个 tab。
       const existing = findMatchingObjectSourceTab(options, id);
       if (existing) {
+        const snapshot = getObjectSourceIdentitySnapshot(existing);
+        if (snapshot) assertSourceIdentity(snapshot);
         clearObjectSourceLoad(tab);
         closeTab(id);
         existing.sourceView = true;
@@ -4252,6 +4300,78 @@ export const useQueryStore = defineStore("query", () => {
     return registerOpenTab(tab);
   }
 
+  const defaultQuerySaveTimers = new Map<string, ReturnType<typeof setTimeout>>();
+  const defaultQuerySaves = new Map<string, Promise<void>>();
+
+  function needsDefaultQuerySave(tab: QueryTab): boolean {
+    return !!tab.isDefaultQuery && !!tab.savedSqlId && tab.originalSql !== undefined && tab.sql !== tab.originalSql;
+  }
+
+  function reportDefaultQuerySaveError(error: unknown) {
+    useToast().toast(i18n.global.t("savedSql.saveFailed", { message: savedSqlErrorMessage(error, i18n.global.t) }), 8000);
+  }
+
+  function flushDefaultQuery(tab: QueryTab): Promise<void> {
+    const timer = defaultQuerySaveTimers.get(tab.id);
+    if (timer) clearTimeout(timer);
+    defaultQuerySaveTimers.delete(tab.id);
+    const pending = defaultQuerySaves.get(tab.id);
+    if (pending) return pending;
+    if (!needsDefaultQuerySave(tab)) return Promise.resolve();
+    const save = (async () => {
+      while (tabs.value.includes(tab) && needsDefaultQuerySave(tab)) {
+        const fileId = tab.savedSqlId!;
+        const sql = tab.sql;
+        await useSavedSqlStore().saveDefaultQueryContent(fileId, sql);
+        // Only acknowledge the snapshot actually saved, never newer edits.
+        if (tab.savedSqlId !== fileId) return;
+        tab.originalSql = sql;
+      }
+    })();
+    defaultQuerySaves.set(tab.id, save);
+    const cleanup = () => {
+      if (defaultQuerySaves.get(tab.id) === save) defaultQuerySaves.delete(tab.id);
+    };
+    void save.then(cleanup, cleanup);
+    return save;
+  }
+
+  async function flushDefaultQueries(ids?: readonly string[]): Promise<void> {
+    await Promise.all(tabs.value.filter((tab) => tab.isDefaultQuery && (!ids || ids.includes(tab.id))).map(flushDefaultQuery));
+  }
+
+  // Watch content rather than only updateSql: formatting, history restoration
+  // and clearing the editor can also replace a tab's document directly.
+  watch(
+    () => tabs.value.filter(needsDefaultQuerySave).map((tab) => ({ id: tab.id, sql: tab.sql })),
+    (drafts) => {
+      const ids = new Set(drafts.map((draft) => draft.id));
+      for (const [id, timer] of defaultQuerySaveTimers) {
+        if (!ids.has(id)) {
+          clearTimeout(timer);
+          defaultQuerySaveTimers.delete(id);
+        }
+      }
+      for (const { id } of drafts) {
+        const previous = defaultQuerySaveTimers.get(id);
+        if (previous) clearTimeout(previous);
+        defaultQuerySaveTimers.set(
+          id,
+          setTimeout(() => {
+            defaultQuerySaveTimers.delete(id);
+            const tab = tabs.value.find((item) => item.id === id);
+            if (tab) void flushDefaultQuery(tab).catch(reportDefaultQuerySaveError);
+          }, 500),
+        );
+      }
+    },
+    { deep: true },
+  );
+  onScopeDispose(() => {
+    for (const timer of defaultQuerySaveTimers.values()) clearTimeout(timer);
+    defaultQuerySaveTimers.clear();
+  });
+
   function isTabDirty(tab: QueryTab): boolean {
     if (tab.mode === "structure") {
       // Legacy persisted structure drafts predate the dirty flag; treat them as dirty until the editor rehydrates them.
@@ -4267,9 +4387,10 @@ export const useQueryStore = defineStore("query", () => {
   const hasDirtyTabs = computed(() => tabs.value.some((tab) => isTabDirty(tab)));
   const shouldConfirmUnsavedSqlClose = computed(() => useSettingsStore().editorSettings.confirmUnsavedSqlClose);
   const keepUnsavedTabsDraftsOnAppClose = computed(() => useSettingsStore().editorSettings.appCloseUnsavedTabsMode === "keep-drafts");
-  const requiresAppCloseDraftPersist = computed(() => shouldConfirmUnsavedSqlClose.value && keepUnsavedTabsDraftsOnAppClose.value && tabs.value.some((tab) => tab.mode === "query" && isTabDirty(tab)));
+  const requiresAppCloseDraftPersist = computed(() => tabs.value.some((tab) => tab.isDefaultQuery) || (shouldConfirmUnsavedSqlClose.value && keepUnsavedTabsDraftsOnAppClose.value && tabs.value.some((tab) => tab.mode === "query" && isTabDirty(tab))));
 
   function shouldConfirmTabOnAppClose(tab: QueryTab): boolean {
+    if (tab.isDefaultQuery) return false;
     if (!shouldConfirmTabClose(tab)) return false;
     return !keepUnsavedTabsDraftsOnAppClose.value || tab.mode !== "query";
   }
@@ -4485,6 +4606,21 @@ export const useQueryStore = defineStore("query", () => {
       return;
     }
 
+    if (
+      remainingIds.some((id) => {
+        const tab = tabs.value.find((item) => item.id === id);
+        return tab && (needsDefaultQuerySave(tab) || defaultQuerySaves.has(id));
+      })
+    ) {
+      void flushDefaultQueries(remainingIds)
+        .then(() => continuePendingBatchClose())
+        .catch((error) => {
+          cancelClosePendingTab();
+          reportDefaultQuerySaveError(error);
+        });
+      return;
+    }
+
     const dirtyTab = remainingIds.map((id) => tabs.value.find((tab) => tab.id === id)).find((tab): tab is QueryTab => !!tab && shouldConfirmTabClose(tab));
     if (dirtyTab) {
       // Batch close must pause before dropping dirty tabs so the shared save/discard dialog protects every editable surface.
@@ -4590,6 +4726,12 @@ export const useQueryStore = defineStore("query", () => {
   function closeTab(id: string, { force = false, skipHistory = false }: { force?: boolean; skipHistory?: boolean } = {}) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
+    if (needsDefaultQuerySave(tab) || (tab.isDefaultQuery && defaultQuerySaves.has(id))) {
+      void flushDefaultQuery(tab)
+        .then(() => closeTab(id, { force, skipHistory }))
+        .catch(reportDefaultQuerySaveError);
+      return;
+    }
     if (!force && shouldConfirmTabClose(tab)) {
       showDirtyTabCloseConfirm(tab, "tab");
       return;
@@ -4650,6 +4792,7 @@ export const useQueryStore = defineStore("query", () => {
   }
 
   function shouldConfirmTabClose(tab: QueryTab): boolean {
+    if (tab.isDefaultQuery) return false;
     if (tab.mode === "structure") return isTabDirty(tab);
     return shouldConfirmUnsavedSqlClose.value && isTabDirty(tab);
   }
@@ -4986,6 +5129,16 @@ export const useQueryStore = defineStore("query", () => {
     if (!entry) return null;
 
     const restoredTab = snapshotClosedTab(entry.tab);
+    if (restoredTab.isDefaultQuery) {
+      const existing = tabs.value.find((tab) => tab.savedSqlId === restoredTab.savedSqlId);
+      if (existing) {
+        switchTab(existing.id);
+        return existing.id;
+      }
+      // Reopen the current document, not an old closed-tab SQL snapshot.
+      void openDefaultQuery(savedSqlExecutionTargetFromTab(restoredTab)!).catch(reportDefaultQuerySaveError);
+      return null;
+    }
     if (tabs.value.some((t) => t.id === restoredTab.id)) {
       restoredTab.id = uuid();
     }
@@ -5032,6 +5185,12 @@ export const useQueryStore = defineStore("query", () => {
     if (closingIds.size === 0) return;
 
     const closingTabs = tabs.value.filter((tab) => closingIds.has(tab.id));
+    if (closingTabs.some((tab) => needsDefaultQuerySave(tab) || (tab.isDefaultQuery && defaultQuerySaves.has(tab.id)))) {
+      void flushDefaultQueries([...closingIds])
+        .then(() => closeTabsWhere((tab) => closingIds.has(tab.id)))
+        .catch(reportDefaultQuerySaveError);
+      return;
+    }
     closingTabs.forEach((tab) => {
       if (tab.mode === "sqlserver-trace") void disposeSqlServerActivityTrace(tab.id);
       clearDataGridPendingSnapshotsForTab(tab.id);
@@ -5376,6 +5535,7 @@ export const useQueryStore = defineStore("query", () => {
   function updateSql(id: string, sql: string) {
     const tab = tabs.value.find((t) => t.id === id);
     if (tab) {
+      if (tab.isDefaultQuery && tab.originalSql === undefined) tab.originalSql = "";
       tab.sql = sql;
       queueSavedSqlEditorPositionPersist(tab);
     }
@@ -5795,6 +5955,7 @@ export const useQueryStore = defineStore("query", () => {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
     tab.savedSqlId = savedSqlId;
+    tab.isDefaultQuery = useSavedSqlStore().getFile(savedSqlId)?.isDefaultQuery === true;
     tab.externalSqlPath = undefined;
     tab.externalSqlEncoding = undefined;
     tab.externalSqlFileVersion = undefined;
@@ -5815,6 +5976,7 @@ export const useQueryStore = defineStore("query", () => {
     tab.externalSqlIgnoredFileVersion = undefined;
     tab.externalSqlFileMissing = undefined;
     tab.savedSqlId = undefined;
+    tab.isDefaultQuery = false;
     if (title) {
       tab.title = title;
       tab.customTitle = true;
@@ -5852,16 +6014,22 @@ export const useQueryStore = defineStore("query", () => {
     return synchronized;
   }
 
+  async function openDefaultQuery(target: SavedSqlExecutionTarget) {
+    const file = await useSavedSqlStore().ensureDefaultQuery({ ...target, schema: undefined });
+    return openSavedSql(file);
+  }
+
   function openSavedSql(file: SavedSqlFile, options: OpenSavedSqlOptions = {}) {
-    const targetMode = options.targetMode ?? useSettingsStore().editorSettings.savedSqlOpenTargetMode;
+    const targetMode = file.isDefaultQuery ? "saved" : (options.targetMode ?? useSettingsStore().editorSettings.savedSqlOpenTargetMode);
     const currentTarget = currentSavedSqlExecutionTarget();
     const resolvedCurrent = targetMode === "current" ? currentTarget : undefined;
     const effectiveConnectionId = file.connectionId || resolvedCurrent?.connectionId || currentTarget?.connectionId || "";
     const connection = effectiveConnectionId ? useConnectionStore().getConfig(effectiveConnectionId) : undefined;
     const fallbackDb = connection ? targetDefaultDatabase(connection) || connection.database : undefined;
-    const target = resolveSavedSqlExecutionTarget(file, targetMode, resolvedCurrent ?? currentTarget, fallbackDb);
+    const target = file.isDefaultQuery ? savedSqlExecutionTargetFromFile(file) : resolveSavedSqlExecutionTarget(file, targetMode, resolvedCurrent ?? currentTarget, fallbackDb);
     const existing = tabs.value.find((tab) => tab.savedSqlId === file.id);
     if (existing) {
+      existing.isDefaultQuery = file.isDefaultQuery === true;
       persistSavedSqlEditorPosition(existing);
       if (!existing.sql && file.sql && existing.originalSql === undefined) {
         existing.sql = file.sql;
@@ -5891,6 +6059,7 @@ export const useQueryStore = defineStore("query", () => {
       catalog: target.catalog,
       sql: file.sql,
       savedSqlId: file.id,
+      isDefaultQuery: file.isDefaultQuery === true,
       originalSql: file.sql,
       isExecuting: false,
       isCancelling: false,
@@ -5908,6 +6077,11 @@ export const useQueryStore = defineStore("query", () => {
     await initSavedSqlEditorPositions();
     const savedSqlStore = useSavedSqlStore();
     const linkedTabs = tabs.value.filter((tab) => tab.savedSqlId && tab.sql === "" && tab.originalSql === undefined);
+    const hasUnindexedSavedSqlTab = tabs.value.some((tab) => tab.savedSqlId && !savedSqlStore.getFile(tab.savedSqlId));
+    if (linkedTabs.length > 0 && hasUnindexedSavedSqlTab) await savedSqlStore.initFromStorage();
+    for (const tab of tabs.value) {
+      if (tab.savedSqlId) tab.isDefaultQuery = savedSqlStore.getFile(tab.savedSqlId)?.isDefaultQuery === true;
+    }
     for (const tab of linkedTabs) {
       const file = await savedSqlStore.ensureFileContent(tab.savedSqlId!);
       if (!file) continue;
@@ -5977,6 +6151,15 @@ export const useQueryStore = defineStore("query", () => {
     if (options.persistSavedSqlTarget === false || tab.mode !== "query" || !tab.savedSqlId) return;
     const savedSqlStore = useSavedSqlStore();
     const savedSqlId = tab.savedSqlId;
+    const file = savedSqlStore.getFile(savedSqlId);
+    if (file?.isDefaultQuery && (file.connectionId !== tab.connectionId || file.database !== tab.database || (file.catalog || "") !== (tab.catalog || ""))) {
+      const target = savedSqlExecutionTargetFromTab(tab)!;
+      applySavedSqlExecutionTarget(tab, savedSqlExecutionTargetFromFile(file));
+      void flushDefaultQuery(tab)
+        .then(() => openDefaultQuery(target))
+        .catch(reportDefaultQuerySaveError);
+      return;
+    }
     void savedSqlStore
       .updateFileExecutionTarget(savedSqlId, {
         connectionId: tab.connectionId,
@@ -6203,9 +6386,13 @@ export const useQueryStore = defineStore("query", () => {
   function setErrorResult(id: string, e: any) {
     const tab = tabs.value.find((t) => t.id === id);
     if (!tab) return;
+    const previousDisplayedResults = [tab.result, ...(tab.results ?? [])];
     tab.result = toErrorResult(e);
     tab.results = undefined;
     tab.activeResultIndex = undefined;
+    if (previousDisplayedResults.some(Boolean)) {
+      releaseReplacedResultLargeValues(tab, ...previousDisplayedResults);
+    }
     // An error result is a replacement, not the previous dataset.
     publishResultGeneration(tab, "execute");
     tab.resultSessionId = undefined;
@@ -6460,7 +6647,11 @@ export const useQueryStore = defineStore("query", () => {
     // schema was selected instead of assuming public (or the database name).
     const useCurrentPostgresSchema = (dbType === "postgres" || dbType === "kwdb") && !source.schema && !tab.schema;
     const resolvedSchema = (dbType === "sqlserver" && !source.schema) || (ORACLE_LIKE_METADATA_TYPES.has(metadataDbType) && !schema) || resolveAgentSearchPathSchema || useCurrentPostgresSchema ? "" : metadataSchemaForConnection(conn, metadataDatabase, schema || undefined);
-    const metadataSchema = normalizeUppercaseFoldedMetadataIdentifier(metadataDbType, resolvedSchema || undefined, source.schema ? source.schemaQuoted : false) || "";
+    // DB2 switches the selected execution schema using a quoted identifier.
+    // That context already names a physical schema; only an explicit SQL
+    // schema token may need folding according to its quoting flag.
+    const preserveSchemaCase = source.schema ? source.schemaQuoted : metadataDbType === "db2";
+    const metadataSchema = normalizeUppercaseFoldedMetadataIdentifier(metadataDbType, resolvedSchema || undefined, preserveSchemaCase) || "";
     const metadataTableName = normalizeUppercaseFoldedMetadataIdentifier(metadataDbType, foldUnquotedPostgresMetadataIdentifier(metadataDbType, source.tableName, source.tableNameQuoted)!, source.tableNameQuoted)!;
     // An unqualified source resolves in the tab's current external catalog on
     // Doris-family federation: the statement executed there through the
@@ -6688,6 +6879,14 @@ export const useQueryStore = defineStore("query", () => {
 
       const target = resolveEditableSourceMetadataTarget(tab, analysis, source, conn, databaseType, executionDatabase);
       const cached = getCachedTableMetadata(target.request);
+      // Dameng dictionary reads can be much slower than the user's SELECT.
+      // Cold metadata only enriches editing: dispatch the original SQL first,
+      // then let analyzeQueryMetadataInBackground populate the shared cache.
+      // Do not start a competing dictionary request before the result arrives.
+      if (databaseType === "dameng" && !cached) {
+        queryExecutionLog("info", "metadata:preflight:deferred", { traceId, table: target.request.tableName, databaseType, elapsed: elapsed() });
+        return unchanged;
+      }
       let loaded = cached ? loadedEditableSourceFromMetadata(target, cached.metadata) : undefined;
       if (!cached && (databaseType === "oracle" || databaseType === "xugu")) {
         // Oracle column discovery can be slow. A star projection over a table
@@ -7346,7 +7545,11 @@ export const useQueryStore = defineStore("query", () => {
     const elapsed = () => `${Math.round(performance.now() - startedAt)}ms`;
     const batchResume = options?.batchResume;
     const continueOnBatchError = batchResume?.continueOnError ?? settingsStore.editorSettings.continueOnErrorOnBatch;
-    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || captureAutoSavedResultRun || (tab.mode === "query" && !!tab.activeResultRunId && !tab.resultAutoSave && !captureResultRun);
+    // Keep the last query result mounted while a replacement query is running.
+    // Clearing it first unmounts DataGrid and its toolbar, so a slow query makes
+    // the result actions disappear until the new response arrives (issue #10008).
+    const preserveQueryResultDuringExecution = tab.mode === "query" && !!tab.result && !captureResultRun;
+    const preserveResultDuringExecution = batchResume !== undefined || options?.preserveResultDuringExecution === true || captureAutoSavedResultRun || preserveQueryResultDuringExecution;
     const updateActiveResultRun = !!tab.activeResultRunId && preserveResultDuringExecution;
     tab.isExecuting = true;
     tab.executingResultRunId = !captureResultRun && updateActiveResultRun ? tab.activeResultRunId : null;
@@ -7692,6 +7895,10 @@ export const useQueryStore = defineStore("query", () => {
                 const paginationSource = siblingPrefix ? `db${siblingPrefix.rest}` : sourceStatement;
                 const pagePlan = planMongoFindPagination(paginationSource, mongoCommand, options?.pagination?.offset ?? 0, normalizeResultPageSize(options?.pagination?.limit ?? settingsStore.editorSettings.pageSize));
                 if (!pagePlan) throw new Error(describeMongoCommandParseFailure(sourceStatement));
+                // An explicit .limit() that fits in the first page returns every
+                // logical row at once, so the page itself is the exact total and
+                // counting every match would only add latency (#10121).
+                const totalFromPage = mongoFindPageCoversLogicalLimit(pagePlan);
                 // A stale request can point past an explicit .limit() bound. Keep
                 // the backend call bounded so limit(0) cannot become unbounded.
                 const result = await commandTiming.run(
@@ -7706,10 +7913,11 @@ export const useQueryStore = defineStore("query", () => {
                   mongoCommand.sort,
                   mongoCommand.collation,
                   executionId,
+                  !totalFromPage,
                 );
                 const documents = pagePlan.requestLimit === 0 ? [] : result.documents;
                 const extendedDocuments = pagePlan.requestLimit === 0 ? [] : result.extended_documents;
-                const totalIsExact = result.total_is_exact !== false;
+                const totalIsExact = totalFromPage || result.total_is_exact !== false;
                 const reportedTotal = mongoFindLogicalTotal(result.total, pagePlan);
                 const loadedLowerBound = pagePlan.pageOffset + documents.length;
                 const total = totalIsExact ? reportedTotal : Math.max(reportedTotal, loadedLowerBound);
@@ -8032,6 +8240,7 @@ export const useQueryStore = defineStore("query", () => {
           if (captureResultRun && current.isCancelling && restorePendingResultRun(current, executionId)) return false;
           const activeGroupIndex = current.activeResultIndex;
           const activeGroupResults = current.results;
+          const previousDisplayedResults = [current.result, ...(current.results ?? [])];
           const findPageState = mongoFindPageState;
           const shouldAppendResult = !!findPageState && !!options?.appendResult && !!current.result && allResults.length === 1;
           const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && allResults.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
@@ -8061,6 +8270,9 @@ export const useQueryStore = defineStore("query", () => {
             current.results = undefined;
             current.activeResultIndex = undefined;
             current.result = allResults[0];
+          }
+          if (!captureResultRun && previousDisplayedResults.some(Boolean)) {
+            releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
           }
           publishResultGeneration(current, shouldAppendResult ? "append" : "execute");
           producedResult = current.result !== undefined;
@@ -8165,6 +8377,7 @@ export const useQueryStore = defineStore("query", () => {
         hiddenPrimaryKeys = prepared.hiddenPrimaryKeys;
         useLargeValuePreview = prepared.largeValuePreview;
         if (options?.querySort) {
+          const visibleColumnCount = options.querySort.resultColumns.length;
           const sorted = await api.buildSortedQuerySql({
             originalSql: sqlToExecute,
             databaseType: effectiveDbType,
@@ -8172,6 +8385,7 @@ export const useQueryStore = defineStore("query", () => {
             columnIndex: options.querySort.columnIndex,
             column: options.querySort.column,
             direction: options.querySort.direction,
+            tieBreakerColumnIndexes: hiddenPrimaryKeys.map((_, index) => visibleColumnCount + index),
           });
           if (!sorted.ok || !sorted.sql) throw new Error("Unable to build sorted query SQL");
           sqlToExecute = sorted.sql;
@@ -8189,6 +8403,7 @@ export const useQueryStore = defineStore("query", () => {
           pagination,
           useAgentCursor,
           firstPageUsesActualSql: hiddenPrimaryKeys.length > 0,
+          executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
         });
         const canPaginateSqlServerUseScript = !!sqlServerUseScript && !!plan.pageSql && typeof plan.pageLimit === "number" && typeof plan.pageOffset === "number";
         if (plan.paginationError) throw new Error(plan.paginationError);
@@ -8581,6 +8796,7 @@ export const useQueryStore = defineStore("query", () => {
         }
         const activeGroupIndex = current.activeResultIndex;
         const activeGroupResults = current.results;
+        const previousDisplayedResults = [current.result, ...(current.results ?? [])];
         const shouldAppendResult = !!options?.appendResult && !!current.result;
         const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && results.length === 1 && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
         const retainedPaginationResult = options?.retainDisplayedResult === true && results.length === 1 && !isQueryExecutionErrorResult(results[0]!) ? results[0] : undefined;
@@ -8625,6 +8841,9 @@ export const useQueryStore = defineStore("query", () => {
           current.results = undefined;
           current.activeResultIndex = undefined;
           current.result = results[0];
+        }
+        if (!captureResultRun && previousDisplayedResults.some(Boolean)) {
+          releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
         }
         // Logical-result identity for the view-snapshot cache. An append extends
         // the same dataset; every other branch above replaces it.
@@ -8802,6 +9021,7 @@ export const useQueryStore = defineStore("query", () => {
         annotateSingleStatementErrorResult(errorResult, queryBaseSql, errorLocateContext?.databaseType, errorLocateContext?.sourceOffset, errorLocateContext?.parameterOptions, errorLocateContext?.executedSql);
         const activeGroupIndex = current.activeResultIndex;
         const activeGroupResults = current.results;
+        const previousDisplayedResults = [current.result, ...(current.results ?? [])];
         const shouldReplaceActiveResultInGroup = options?.replaceActiveResultInGroup === true && Array.isArray(activeGroupResults) && typeof activeGroupIndex === "number" && activeGroupIndex >= 0 && activeGroupIndex < activeGroupResults.length;
         if (shouldReplaceActiveResultInGroup) {
           current.results = activeGroupResults.slice();
@@ -8811,6 +9031,9 @@ export const useQueryStore = defineStore("query", () => {
           current.result = errorResult;
           current.results = undefined;
           current.activeResultIndex = undefined;
+        }
+        if (!captureResultRun && previousDisplayedResults.some(Boolean)) {
+          releaseReplacedResultLargeValues(current, ...previousDisplayedResults);
         }
         current.queryAnalysis = undefined;
         current.querySourceColumns = undefined;
@@ -10016,6 +10239,7 @@ export const useQueryStore = defineStore("query", () => {
           pagination: { limit: effectivePageLimit, offset, sessionId },
           useAgentCursor,
           firstPageUsesActualSql: true,
+          executionHint: effectiveDbType === "gaussdb" ? gaussdbCountQueryDopHint(conn) : undefined,
         });
         if (probeRowLimit && plan.paginationError) throw new Error(plan.paginationError);
         if (typeof plan.pageLimit !== "number" || typeof plan.pageOffset !== "number") return cachedResultForExport();
@@ -10343,6 +10567,8 @@ export const useQueryStore = defineStore("query", () => {
     linkExternalSqlPath,
     openExternalSqlFile,
     openSavedSql,
+    openDefaultQuery,
+    flushDefaultQueries,
     hydrateSavedSqlTabs,
     syncSavedSqlExecutionTargets,
     togglePinnedTab,
@@ -10358,6 +10584,7 @@ export const useQueryStore = defineStore("query", () => {
     invalidateTableStructure,
     tableStructureRefreshVersion,
     setObjectSource,
+    getObjectSourceIdentitySnapshot,
     setExecuting,
     setExecutingWithId,
     setErrorResult,

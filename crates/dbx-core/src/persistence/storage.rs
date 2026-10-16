@@ -1161,6 +1161,8 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         messages_json TEXT NOT NULL DEFAULT '[]',
         queued_input TEXT,
         plugin_context_json TEXT,
+        assistant_mode TEXT,
+        assistant_action TEXT,
         created_at TEXT NOT NULL DEFAULT '',
         updated_at TEXT NOT NULL DEFAULT ''
     )",
@@ -1243,6 +1245,7 @@ const SCHEMA_STATEMENTS: &[&str] = &[
         updated_at TEXT NOT NULL DEFAULT ''
     )",
     "CREATE TABLE IF NOT EXISTS saved_sql_files (
+        is_default_query INTEGER NOT NULL DEFAULT 0,
         id TEXT PRIMARY KEY,
         connection_id TEXT NOT NULL,
         folder_id TEXT,
@@ -3183,6 +3186,7 @@ fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
     const FOLDER_COLUMNS: &[(&str, &str)] =
         &[("parent_folder_id", "TEXT"), ("order_index", "INTEGER NOT NULL DEFAULT 0")];
     const FILE_COLUMNS: &[(&str, &str)] = &[
+        ("is_default_query", "INTEGER NOT NULL DEFAULT 0"),
         ("catalog_name", "TEXT"),
         ("order_index", "INTEGER NOT NULL DEFAULT 0"),
         ("open_count", "INTEGER NOT NULL DEFAULT 0"),
@@ -3191,6 +3195,12 @@ fn ensure_saved_sql_columns_sync(conn: &Connection) -> Result<(), String> {
 
     ensure_table_columns(conn, "saved_sql_folders", FOLDER_COLUMNS)?;
     ensure_table_columns(conn, "saved_sql_files", FILE_COLUMNS)?;
+    conn.execute_batch(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_saved_sql_default_scope
+         ON saved_sql_files(connection_id, COALESCE(catalog_name, ''), database_name)
+         WHERE is_default_query = 1;",
+    )
+    .map_err(|e| e.to_string())?;
     Ok(())
 }
 
@@ -3243,6 +3253,12 @@ fn ensure_ai_conversations_columns_sync(conn: &Connection) -> Result<(), String>
         // [`backfill_ai_conversation_connections`].
         ("connection_id", "TEXT NOT NULL DEFAULT ''"),
         ("schema_name", "TEXT"),
+        // Per-conversation picker selection (#12075). Plain TEXT and nullable:
+        // a legacy row keeps NULL, which the frontend reads as "no recorded
+        // choice" and resolves through the plugin context and then the settings
+        // default.
+        ("assistant_mode", "TEXT"),
+        ("assistant_action", "TEXT"),
     ];
 
     ensure_table_columns(conn, "ai_conversations", COLUMNS)
@@ -6134,8 +6150,8 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations \
-                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                    title = excluded.title, \
                    connection_name = excluded.connection_name, \
@@ -6145,7 +6161,8 @@ impl Storage {
                    messages_json = excluded.messages_json, \
                    queued_input = excluded.queued_input, \
                    created_at = excluded.created_at, \
-                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json",
+                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json, \
+                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action",
                 params![
                     conv.id,
                     conv.title,
@@ -6157,7 +6174,9 @@ impl Storage {
                     conv.queued_input,
                     conv.created_at,
                     conv.updated_at,
-                    conv.plugin_context.map(|value| value.to_string())
+                    conv.plugin_context.map(|value| value.to_string()),
+                    conv.assistant_mode,
+                    conv.assistant_action
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -6172,7 +6191,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json, connection_id, schema_name \
+                    "SELECT id, title, connection_name, database, messages_json, queued_input, created_at, updated_at, plugin_context_json, connection_id, schema_name, assistant_mode, assistant_action \
                      FROM ai_conversations ORDER BY updated_at DESC",
                 )
                 .map_err(|e| e.to_string())?;
@@ -6193,6 +6212,8 @@ impl Storage {
                         plugin_context: row.get::<_, Option<String>>(8)?.map(|json| serde_json::from_str(&json)).transpose().map_err(map_from_sql_err)?,
                         connection_id: row.get(9)?,
                         schema: row.get(10)?,
+                        assistant_mode: row.get(11)?,
+                        assistant_action: row.get(12)?,
                     })
                 })
                 .map_err(|e| e.to_string())?;
@@ -6259,8 +6280,8 @@ impl Storage {
             let tx = conn.transaction().map_err(|e| e.to_string())?;
             tx.execute(
                 "INSERT INTO ai_conversations
-                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 (id, title, connection_name, connection_id, database, schema_name, messages_json, queued_input, created_at, updated_at, plugin_context_json, assistant_mode, assistant_action)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                  ON CONFLICT(id) DO UPDATE SET
                    title = excluded.title,
                    connection_name = excluded.connection_name,
@@ -6270,7 +6291,8 @@ impl Storage {
                    messages_json = excluded.messages_json,
                    queued_input = excluded.queued_input,
                    created_at = excluded.created_at,
-                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json",
+                   updated_at = excluded.updated_at, plugin_context_json = excluded.plugin_context_json,
+                   assistant_mode = excluded.assistant_mode, assistant_action = excluded.assistant_action",
                 params![
                     conv.id,
                     conv.title,
@@ -6282,7 +6304,9 @@ impl Storage {
                     conv.queued_input,
                     conv.created_at,
                     conv.updated_at,
-                    conv.plugin_context.map(|value| value.to_string())
+                    conv.plugin_context.map(|value| value.to_string()),
+                    conv.assistant_mode,
+                    conv.assistant_action
                 ],
             )
             .map_err(|e| e.to_string())?;
@@ -7794,8 +7818,8 @@ impl Storage {
             for file in &library.files {
                 tx.execute(
                     "INSERT INTO saved_sql_files \
-                     (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
-                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                     (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query) \
+                     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     params![
                         file.id,
                         file.connection_id,
@@ -7809,7 +7833,8 @@ impl Storage {
                         file.open_count,
                         file.opened_at,
                         file.created_at,
-                        file.updated_at
+                        file.updated_at,
+                        file.is_default_query
                     ],
                 )
                 .map_err(|e| e.to_string())?;
@@ -7846,7 +7871,7 @@ impl Storage {
 
             let mut file_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7867,6 +7892,7 @@ impl Storage {
                         opened_at: row.get(10)?,
                         created_at: row.get(11)?,
                         updated_at: row.get(12)?,
+                        is_default_query: row.get(13)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -7882,7 +7908,7 @@ impl Storage {
         self.with_conn(|conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7903,6 +7929,7 @@ impl Storage {
                         opened_at: row.get(10)?,
                         created_at: row.get(11)?,
                         updated_at: row.get(12)?,
+                        is_default_query: row.get(13)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -7939,7 +7966,7 @@ impl Storage {
 
             let mut file_stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files ORDER BY COALESCE(folder_id, ''), order_index, connection_id, name COLLATE NOCASE",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7960,6 +7987,7 @@ impl Storage {
                         opened_at: row.get(9)?,
                         created_at: row.get(10)?,
                         updated_at: row.get(11)?,
+                        is_default_query: row.get(12)?,
                     })
                 })
                 .map_err(|e| e.to_string())?
@@ -7976,7 +8004,7 @@ impl Storage {
         self.with_conn(move |conn| {
             let mut stmt = conn
                 .prepare(
-                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at \
+                    "SELECT id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query \
                      FROM saved_sql_files WHERE id = ?1",
                 )
                 .map_err(|e| e.to_string())?;
@@ -7996,6 +8024,7 @@ impl Storage {
                     opened_at: row.get(10)?,
                     created_at: row.get(11)?,
                     updated_at: row.get(12)?,
+                    is_default_query: row.get(13)?,
                 })
             }) {
                 Ok(file) => Ok(Some(file)),
@@ -8069,8 +8098,8 @@ impl Storage {
         self.with_conn(move |conn| {
             conn.execute(
                 "INSERT INTO saved_sql_files \
-                 (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET \
                  connection_id = excluded.connection_id, \
                  folder_id = excluded.folder_id, \
@@ -8078,11 +8107,12 @@ impl Storage {
                  database_name = excluded.database_name, \
                  catalog_name = excluded.catalog_name, \
                  schema_name = excluded.schema_name, \
-                 sql_text = CASE WHEN ?14 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
+                 sql_text = CASE WHEN ?15 THEN excluded.sql_text ELSE saved_sql_files.sql_text END, \
                  order_index = excluded.order_index, \
                  open_count = excluded.open_count, \
                  opened_at = excluded.opened_at, \
-                 updated_at = excluded.updated_at",
+                 updated_at = excluded.updated_at, \
+                 is_default_query = excluded.is_default_query",
                 params![
                     file.id,
                     file.connection_id,
@@ -8097,11 +8127,31 @@ impl Storage {
                     file.opened_at,
                     file.created_at,
                     file.updated_at,
+                    file.is_default_query,
                     file.sql_loaded
                 ],
             )
             .map(|_| ())
             .map_err(|e| e.to_string())
+        })
+        .await
+    }
+
+    /// Autosave only the document body: concurrent metadata writes must not be
+    /// overwritten, and a deleted default query must never be recreated here.
+    pub async fn save_default_query_content(&self, id: &str, sql: &str, updated_at: &str) -> Result<(), String> {
+        let (id, sql, updated_at) = (id.to_string(), sql.to_string(), updated_at.to_string());
+        self.with_conn(move |conn| {
+            let changed = conn
+                .execute(
+                    "UPDATE saved_sql_files SET sql_text = ?2, updated_at = ?3 WHERE id = ?1 AND is_default_query = 1",
+                    params![id, sql, updated_at],
+                )
+                .map_err(|e| e.to_string())?;
+            if changed == 0 {
+                return Err("Default query no longer exists".to_string());
+            }
+            Ok(())
         })
         .await
     }
@@ -9448,8 +9498,8 @@ fn apply_saved_sql_in_tx(tx: &Transaction<'_>, library: &SavedSqlLibrary, merge_
     }
     for file in &library.files {
         tx.execute(
-            "INSERT OR REPLACE INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            params![file.id, file.connection_id, file.folder_id, file.name, file.database, file.catalog, file.schema, file.sql, file.order_index, file.open_count, file.opened_at, file.created_at, file.updated_at],
+            "INSERT INTO saved_sql_files (id, connection_id, folder_id, name, database_name, catalog_name, schema_name, sql_text, order_index, open_count, opened_at, created_at, updated_at, is_default_query) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET connection_id=excluded.connection_id, folder_id=excluded.folder_id, name=excluded.name, database_name=excluded.database_name, catalog_name=excluded.catalog_name, schema_name=excluded.schema_name, sql_text=excluded.sql_text, order_index=excluded.order_index, open_count=excluded.open_count, opened_at=excluded.opened_at, created_at=excluded.created_at, updated_at=excluded.updated_at, is_default_query=excluded.is_default_query",
+            params![file.id, file.connection_id, file.folder_id, file.name, file.database, file.catalog, file.schema, file.sql, file.order_index, file.open_count, file.opened_at, file.created_at, file.updated_at, file.is_default_query],
         )
         .map_err(|e| e.to_string())?;
     }
@@ -10687,6 +10737,8 @@ mod tests {
                 loaded_skill_ids: None,
             }],
             queued_input: None,
+            assistant_mode: None,
+            assistant_action: None,
             created_at: updated_at.to_string(),
             updated_at: updated_at.to_string(),
         }
@@ -11001,6 +11053,84 @@ mod tests {
         assert_eq!(source.schema.as_deref(), Some("legacy"));
         let legacy: AiChatMessage = serde_json::from_str(r#"{"role":"assistant","content":"old reply"}"#).unwrap();
         assert!(legacy.source_binding.is_none());
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    /// #12075 / AC14 — a database created before the picker columns existed must
+    /// upgrade in place, and both conversation upsert paths must carry the new
+    /// values. Tests the real migration (`ensure_ai_conversations_columns_sync`),
+    /// not just serde: the columns have to exist before the INSERT can name them.
+    #[tokio::test]
+    async fn ai_conversation_upgrades_legacy_schema_and_roundtrips_picker_selection() {
+        let path = temp_db_path("ai-conversation-picker-selection");
+        // Pre-#12075 schema: none of the later columns exist yet.
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE ai_conversations (
+            id TEXT PRIMARY KEY, title TEXT NOT NULL DEFAULT '', connection_name TEXT NOT NULL DEFAULT '',
+            database TEXT NOT NULL DEFAULT '', messages_json TEXT NOT NULL DEFAULT '[]',
+            created_at TEXT NOT NULL DEFAULT '', updated_at TEXT NOT NULL DEFAULT ''
+        ); INSERT INTO ai_conversations (id, title) VALUES ('legacy', 'SQL conversation');",
+        )
+        .unwrap();
+        drop(conn);
+
+        let storage = crate::persistence::test_storage::open(&path).await.unwrap();
+        // The legacy row loads with no recorded picker selection — the frontend's
+        // R9 fallback (settings default + default action) is what fills the UI.
+        let legacy = storage.load_ai_conversations().await.unwrap();
+        assert_eq!(legacy[0].title, "SQL conversation");
+        assert!(legacy[0].assistant_mode.is_none());
+        assert!(legacy[0].assistant_action.is_none());
+
+        // Path 1: the plain conversation upsert.
+        let mut conversation = ai_conversation("picker-conv", "0001");
+        conversation.assistant_mode = Some("agent".to_string());
+        conversation.assistant_action = Some("auto".to_string());
+        storage.save_ai_conversation(&conversation).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "picker-conv").unwrap();
+        assert_eq!(saved.assistant_mode.as_deref(), Some("agent"));
+        // `auto` is the recorded picker entry, not a routed concrete action (R8).
+        assert_eq!(saved.assistant_action.as_deref(), Some("auto"));
+
+        // Path 2: the conversation+run upsert used by background runs.
+        let mut run_conversation = ai_conversation("run-conv", "0002");
+        run_conversation.assistant_mode = Some("ask".to_string());
+        run_conversation.assistant_action = Some("optimize".to_string());
+        let run = ai_run("run-1", "run-conv", AiRunStatus::Running, "0002");
+        storage.save_ai_run_state(&run_conversation, &run).await.unwrap();
+
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "run-conv").unwrap();
+        assert_eq!(saved.assistant_mode.as_deref(), Some("ask"));
+        assert_eq!(saved.assistant_action.as_deref(), Some("optimize"));
+        // The legacy row is still there, still without a recorded selection.
+        let legacy = loaded.iter().find(|item| item.id == "legacy").unwrap();
+        assert!(legacy.assistant_mode.is_none());
+        assert!(legacy.assistant_action.is_none());
+
+        // Clearing the picker selection (a future "forget the choice" path) writes
+        // NULL rather than a stale value.
+        conversation.assistant_mode = None;
+        conversation.assistant_action = None;
+        storage.save_ai_conversation(&conversation).await.unwrap();
+        let loaded = storage.load_ai_conversations().await.unwrap();
+        let saved = loaded.iter().find(|item| item.id == "picker-conv").unwrap();
+        assert!(saved.assistant_mode.is_none());
+        assert!(saved.assistant_action.is_none());
+
+        // A record written before the fields existed still deserializes; the JSON
+        // boundary is what the cloud-sync / web transports carry.
+        let legacy_json: AiConversation = serde_json::from_str(r#"{"id":"old","title":"Old","connectionName":"","connectionId":"","database":"","messages":[],"createdAt":"0000","updatedAt":"0000"}"#).unwrap();
+        assert!(legacy_json.assistant_mode.is_none());
+        assert!(legacy_json.assistant_action.is_none());
+        // `None` is skipped entirely, so an old reader sees the record it always saw.
+        let serialized = serde_json::to_value(&legacy_json).unwrap();
+        assert!(serialized.get("assistantMode").is_none());
+        assert!(serialized.get("assistantAction").is_none());
 
         let _ = std::fs::remove_file(path);
     }
@@ -13828,6 +13958,7 @@ mod tests {
         let path = temp_db_path("saved-sql-summary");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let file = SavedSqlFile {
+            is_default_query: false,
             id: "sql-1".to_string(),
             connection_id: "conn-1".to_string(),
             folder_id: None,
@@ -13869,6 +14000,7 @@ mod tests {
         let path = temp_db_path("saved-sql-preserve-unloaded-text");
         let storage = crate::persistence::test_storage::open(&path).await.unwrap();
         let mut file = SavedSqlFile {
+            is_default_query: false,
             id: "sql-1".to_string(),
             connection_id: "conn-1".to_string(),
             folder_id: None,
@@ -13937,6 +14069,7 @@ mod tests {
         assert_eq!(legacy.catalog, None);
 
         let external = SavedSqlFile {
+            is_default_query: false,
             id: "external".to_string(),
             connection_id: "conn-1".to_string(),
             catalog: Some("iceberg_catalog".to_string()),
